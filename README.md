@@ -1,2 +1,2 @@
 # f360_scripts
-Fusion 360 Python scripts
+A collection of Fusion 360 Python scripts
