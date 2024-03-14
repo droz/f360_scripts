@@ -102,6 +102,15 @@ class Facet:
         """
         return any([self.isSame(list_facet) for list_facet in facets])
 
+    def shareVertex(self, facet : 'Facet'):
+        """ Check if two facets share a vertex.
+        Args:
+            facet: The facet to compare against
+        Returns:
+            True if the facets share a vertex, False otherwise
+        """
+        return set(self.vertices) & set(facet.vertices)
+
     def shareSide(self, facet : 'Facet'):
         """ Check if two facets share a side.
         Args:
@@ -449,7 +458,37 @@ class Mesh:
                     new_oriented_facets.add(neighboor)
                     oriented_facets.add(neighboor)
                 unoriented_facets = unoriented_facets - new_oriented_facets
-            print("Oriented %d sub-mesh." % num_connected_meshes)
+            # Try to make the mesh as concave as possible.
+            # For each facet, we count how many other mesh points are
+            #  on each side of the facet. That will tell us if that face
+            #  is locally more concave or convex. If there are more concave
+            #  than convex facets, we flip all the facets.
+            num_concave_facets = 0
+            num_convex_facets = 0
+            for facet in self.facets:
+                facet.fitPlane()
+                num_concave_vertices = 0
+                num_convex_vertices = 0
+                for neighboor_facet in self.facets:
+                    if not facet.shareVertex(neighboor_facet):
+                        continue
+                    for vertex in neighboor_facet.vertices:
+                        if vertex in facet.vertices:
+                            continue
+                        if facet.plane.distance_point_signed(vertex.point) > 0:
+                            num_concave_vertices += 1
+                        else:
+                            num_convex_vertices += 1
+                if num_concave_vertices > num_convex_vertices:
+                    num_concave_facets += 1
+                else:
+                    num_convex_facets += 1
+            print('Mesh : %d concave, %d convex' % (num_concave_facets, num_convex_facets))
+            if num_concave_facets > num_convex_facets:
+                for facet in self.facets:
+                    facet.vertices.reverse()
+            
+        print("Oriented %d sub-mesh." % num_connected_meshes)
 
     def __str__(self) -> str:
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
