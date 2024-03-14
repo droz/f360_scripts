@@ -40,12 +40,13 @@ def run(context):
                     json += '    { "name" : "' + part_name + '",\n'
                     json += '      "edges" : [\n'
                     for edge in sketch.sketchCurves.sketchLines:
-                        x_start_mm = units.convert(edge.geometry.startPoint.x, units.defaultLengthUnits, 'm')
-                        y_start_mm = units.convert(edge.geometry.startPoint.y, units.defaultLengthUnits, 'm')
-                        z_start_mm = units.convert(edge.geometry.startPoint.z, units.defaultLengthUnits, 'm')
-                        x_end_mm = units.convert(edge.geometry.endPoint.x, units.defaultLengthUnits, 'm')
-                        y_end_mm = units.convert(edge.geometry.endPoint.y, units.defaultLengthUnits, 'm')
-                        z_end_mm = units.convert(edge.geometry.endPoint.z, units.defaultLengthUnits, 'm')
+                        # When we export the coordinates, we switch to a Z up coordinate frame
+                        x_start_mm = units.convert(edge.geometry.startPoint.z, units.defaultLengthUnits, 'm')
+                        y_start_mm = units.convert(edge.geometry.startPoint.x, units.defaultLengthUnits, 'm')
+                        z_start_mm = units.convert(edge.geometry.startPoint.y, units.defaultLengthUnits, 'm')
+                        x_end_mm = units.convert(edge.geometry.endPoint.z, units.defaultLengthUnits, 'm')
+                        y_end_mm = units.convert(edge.geometry.endPoint.x, units.defaultLengthUnits, 'm')
+                        z_end_mm = units.convert(edge.geometry.endPoint.y, units.defaultLengthUnits, 'm')
                         json += '        { "start" : [%f, %f, %f], "end" : [%f, %f, %f] },\n' % (
                                  x_start_mm, y_start_mm, z_start_mm,
                                  x_end_mm, y_end_mm, z_end_mm)

@@ -400,10 +400,6 @@ meshes = json_data['meshes']
 for mesh in meshes:
     name = mesh['name']
     mesh_data = mesh['edges']
-
-    if name != "Ear Right":
-        continue
-
     print(name)
     print("-" * len(name))
 
