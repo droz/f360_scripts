@@ -102,6 +102,22 @@ class Facet:
         """
         return any([self.isSame(list_facet) for list_facet in facets])
 
+    def shareSide(self, facet : 'Facet'):
+        """ Check if two facets share a side.
+        Args:
+            facet: The facet to compare against
+        Returns:
+            share_side: True if the facets share a side, False otherwise
+            same_orientation: True if the facets are oriented the same way, False otherwise
+        """
+        for v1l, v2l in zip(self.vertices, self.vertices[1:] + self.vertices[:1]):
+            for v1, v2 in zip(facet.vertices, facet.vertices[1:] + facet.vertices[:1]):
+                if (v1l == v1 and v2l == v2):
+                    return True, False
+                if (v1l == v2 and v2l == v1):
+                    return True, True
+        return False, None
+
     def adjustPoint(self, index):
         """ Adjust a 2d point to make the edges lengths match between 2d and 3d.
         Args:
@@ -195,6 +211,24 @@ class Facet:
                 p2d += v2_b * (l3_b - l2_b) / l2_b
                 p2d -= v2_a * (l3_a - l2_a) / l2_a
 
+    def fitPlane(self):
+        """ Fit a plane to the facet """
+        if len(self.vertices) < 3:
+            raise ValueError('Facet with less than 3 points cannot be projected !!!')
+        # Fit a plane to the facet
+        poly3d = [vertex.point for vertex in self.vertices]
+        self.plane = Plane.best_fit(poly3d)
+        # Make sure the normal is pointing outwards
+        local_normal_fit = []
+        for v0, v1, v2 in zip(self.vertices, self.vertices[1:] + self.vertices[:1], self.vertices[2:] + self.vertices[:2]):
+            d10 = Vector(v0.point - v1.point)
+            d12 = Vector(v2.point - v1.point)
+            normal = d12.cross(d10).unit()
+            normal_fit = self.plane.normal.dot(normal)
+            local_normal_fit.append(normal_fit)
+        if sum(local_normal_fit) < 0:
+            self.plane.normal = - self.plane.normal
+
     def create2dProjection(self):
         """ Compute the 2D shape that should be cut to generate this facet.
         """
@@ -267,6 +301,7 @@ class Mesh:
             # Add the neighboors to the vertices
             start.neighboors.append(end)
             end.neighboors.append(start)
+        print('Built graph with %d vertices' % len(self.vertices))
 
     def explorePath(self, path : list[ Vertex ], max_depth : int):
         """ This is used to explore a path within the mesh,
@@ -312,6 +347,7 @@ class Mesh:
                 continue
             new_quads.append(quad)
         self.facets = triangles + new_quads
+        print('Removed %d redundant quads' % (len(quads) - len(new_quads)))
 
     def findEdges(self):
         """ Find the edges in the mesh """
@@ -321,6 +357,7 @@ class Mesh:
                 edge = Edge(vertex, neighboor)
                 if not edge.isInList(self.edges):
                     self.edges.append(edge)
+        print('Found %d edges' % len(self.edges))
 
     def findFacets(self, max_edges : int):
         """ Find the facets in the mesh.
@@ -342,6 +379,7 @@ class Mesh:
                 continue
             facets_no_dupes.append(facet)
         self.facets = facets_no_dupes
+        print('Found %d facets' % len(self.facets))
 
     def plot(self):
         """ Plot the mesh in 3D """
@@ -366,6 +404,11 @@ class Mesh:
             if len(facet.vertices) > 4:
                 continue
             ax.plot_surface(xs, ys, zs, color='r', shade=False, alpha=0.5)
+            # The normal
+            facet.fitPlane()
+            normal = facet.plane.normal
+            origin = facet.plane.point
+            ax.quiver(origin[0], origin[1], origin[2], normal[0], normal[1], normal[2], length=0.5, color='k', alpha = 0.5)
         # The edges
         xs = list(chain.from_iterable([edge.start.point[0], edge.end.point[0], math.nan] for edge in self.edges))
         ys = list(chain.from_iterable([edge.start.point[1], edge.end.point[1], math.nan] for edge in self.edges))
@@ -380,8 +423,33 @@ class Mesh:
         ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.grid(False)
+        ax.title.set_text(self.name)
         plt.show()
 
+    def orientFacets(self):
+        """ Orient the facets so that the normal is consistent between faces """
+        if not self.facets:
+            return
+        unoriented_facets = set(self.facets)
+        num_connected_meshes = 0
+        while unoriented_facets:
+            # We take one face at random and explore all the faces connected to it
+            num_connected_meshes += 1
+            oriented_facets = set([unoriented_facets.pop()])
+            while oriented_facets:
+                facet = oriented_facets.pop()
+                # Find all the neighboors and orient them the same way as the current facet
+                new_oriented_facets = set()
+                for neighboor in unoriented_facets:
+                    share_side, same_orientation = facet.shareSide(neighboor)
+                    if not share_side:
+                        continue
+                    if not same_orientation:
+                        neighboor.vertices.reverse()
+                    new_oriented_facets.add(neighboor)
+                    oriented_facets.add(neighboor)
+                unoriented_facets = unoriented_facets - new_oriented_facets
+            print("Oriented %d sub-mesh." % num_connected_meshes)
 
     def __str__(self) -> str:
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
@@ -400,6 +468,11 @@ meshes = json_data['meshes']
 for mesh in meshes:
     name = mesh['name']
     mesh_data = mesh['edges']
+
+    #if name != "Ear Right":
+    #    continue
+
+
     print(name)
     print("-" * len(name))
 
@@ -415,6 +488,9 @@ for mesh in meshes:
 
     # Remove the redundant quads (those that are made of two existing triangles)
     mesh.removeRedundantQuads()
+
+    # Orient the facets so that the normal is consistent between faces
+    mesh.orientFacets()
 
     print(mesh)
 
