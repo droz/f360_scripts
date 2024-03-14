@@ -9,6 +9,7 @@ from skspatial.objects import Plane, Vector, Point, Line
 import ezdxf
 from matplotlib import pyplot as plt
 import numpy as np
+import argparse
 
 class Vertex:
     """ This class is used to represent a vertex in th emesh graph"""
@@ -163,18 +164,18 @@ class Facet:
         if len(self.vertices) < 3:
             raise ValueError('Polygon with less than 3 points cannot be projected !!!')
         # Start by fitting a plane to the polygon and projecting the points on it
+        self.fitPlane()
         poly3d = [vertex.point for vertex in self.vertices]
-        plane = Plane.best_fit(poly3d)
-        poly3d_proj = [plane.project_point(point) for point in poly3d]
+        poly3d_proj = [self.plane.project_point(point) for point in poly3d]
 
         # Now we need to rotate the polygon to fit a consistent coordinate frame
         # We use the first edge as x axis.
         x = Vector(poly3d_proj[1] - poly3d_proj[0]).unit()
-        z = plane.normal
+        z = self.plane.normal
         y = z.cross(x)
         self.polygon2d = []
         for point in poly3d_proj:
-            v = Vector(point - plane.point)
+            v = Vector(point - self.plane.point)
             px = x.scalar_projection(v)
             py = y.scalar_projection(v)
             self.polygon2d.append(Point([px, py]))
@@ -193,32 +194,6 @@ class Facet:
             # Now we can adjust the points
             for index in adjust_indexes:
                 self.adjustPoint(index)
-                
-            # Adjust the points to make the edges lengths match
-            for index in [0, 2]:
-                index_before = index - 1
-                if index_before < 0:
-                    index_before += 4
-                index_after = index + 1
-                if index_after >= 4:
-                    index_after -= 4
-                p2d_b = self.polygon2d[index_before]
-                p2d   = self.polygon2d[index]
-                p2d_a = self.polygon2d[index_after]
-                p3d_b = poly3d_proj[index_before]
-                p3d   = poly3d_proj[index]
-                p3d_a = poly3d_proj[index_after]
-                v3_b = Vector(p3d - p3d_b)
-                v3_a = Vector(p3d_a - p3d)
-                v2_b = Vector(p2d - p2d_b)
-                v2_a = Vector(p2d_a - p2d)
-                l3_b = v3_b.norm()
-                l3_a = v3_a.norm()
-                l2_b = v2_b.norm()
-                l2_a = v2_a.norm()
-                
-                p2d += v2_b * (l3_b - l2_b) / l2_b
-                p2d -= v2_a * (l3_a - l2_a) / l2_a
 
     def fitPlane(self):
         """ Fit a plane to the facet """
@@ -237,31 +212,6 @@ class Facet:
             local_normal_fit.append(normal_fit)
         if sum(local_normal_fit) < 0:
             self.plane.normal = - self.plane.normal
-
-    def create2dProjection(self):
-        """ Compute the 2D shape that should be cut to generate this facet.
-        """
-        if len(self.vertices) < 3:
-            raise ValueError('Polygon with less than 3 points cannot be projected !!!')
-        # Start by fitting a plane to the polygon and projecting the points on it
-        poly3d = [vertex.point for vertex in self.vertices]
-        self.plane = Plane.best_fit(poly3d)
-        poly3d_proj = [plane.project_point(point) for point in poly3d]
-        # Now we need to define a coordinate frame. We'll use the first edge as x axis.
-        x = Vector(poly3d[1] - poly3d[0]).unit()
-        z = plane.normal
-        y = z.cross(x)
-        poly2d = []
-        for point in poly3d_proj:
-                v = Vector(point - plane.point)
-                px = x.scalar_projection(v)
-                py = y.scalar_projection(v)
-                poly2d.append(Point([px, py]))
-
-        # Find the best fit plane
-        plane = Plane.best_fit([vertex.point for vertex in polygon])
-        # Project the polygon on the plane
-        return [plane.project_point(vertex.point) for vertex in polygon]
 
     def __str__(self):
         return 'Facet : %d vertices' % len(self.vertices)
@@ -392,7 +342,22 @@ class Mesh:
 
     def plot(self):
         """ Plot the mesh in 3D """
-        ax = plt.figure().add_subplot(projection='3d')
+        fig = plt.figure()
+        fig.suptitle(self.name)
+        fig.set_figwidth(10)
+
+        # 3D view
+        ax = fig.add_subplot(1, 2, 1, projection='3d')
+
+        # Get the bounding box of the mesh
+        min_x = min([vertex.point[0] for vertex in self.vertices])
+        max_x = max([vertex.point[0] for vertex in self.vertices])
+        min_y = min([vertex.point[1] for vertex in self.vertices])
+        max_y = max([vertex.point[1] for vertex in self.vertices])
+        min_z = min([vertex.point[2] for vertex in self.vertices])
+        max_z = max([vertex.point[2] for vertex in self.vertices])
+        max_range = max([max_x - min_x, max_y - min_y, max_z - min_z])
+
         # The facets
         for facet in self.facets:
             if len(facet.vertices) == 3:
@@ -417,7 +382,7 @@ class Mesh:
             facet.fitPlane()
             normal = facet.plane.normal
             origin = facet.plane.point
-            ax.quiver(origin[0], origin[1], origin[2], normal[0], normal[1], normal[2], length=0.5, color='k', alpha = 0.5)
+            ax.quiver(origin[0], origin[1], origin[2], normal[0], normal[1], normal[2], length=max_range * 0.05, color='k', alpha = 0.5)
         # The edges
         xs = list(chain.from_iterable([edge.start.point[0], edge.end.point[0], math.nan] for edge in self.edges))
         ys = list(chain.from_iterable([edge.start.point[1], edge.end.point[1], math.nan] for edge in self.edges))
@@ -427,13 +392,42 @@ class Mesh:
         ax.scatter([vertex.point[0] for vertex in self.vertices],
                    [vertex.point[1] for vertex in self.vertices],
                    [vertex.point[2] for vertex in self.vertices], 'o')
-        ax.axis('equal')
+        ax.dist = ax.dist * 0.6
         ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.grid(False)
-        ax.title.set_text(self.name)
-        plt.show()
+        ax.axis('equal')
+        ax.axis('off')
+
+        # 2D view
+        ax = fig.add_subplot(1, 2, 2)
+        facets = [facet for facet in self.facets if facet.polygon2d]
+        rows = math.ceil(math.sqrt(len(facets)))
+        facet_widths = []
+        facet_heights = []
+        for facet in facets:
+            xs = [point[0] for point in facet.polygon2d]
+            ys = [point[1] for point in facet.polygon2d]
+            facet_widths.append(max(xs) - min(xs))
+            facet_heights.append(max(ys) - min(ys))
+        max_width = max(facet_widths)
+        max_height = max(facet_heights)
+        row = 0
+        col = 0
+        for facet in self.facets:
+            if not facet.polygon2d:
+                continue
+            xs = [point[0] + max_width * 1.05 * col for point in facet.polygon2d]
+            ys = [point[1] + max_height * 1.05 * row for point in facet.polygon2d] 
+            col += 1
+            if col == rows:
+                col = 0
+                row += 1
+            ax.plot(xs + [xs[0]], ys + [ys[0]], 'r')
+        ax.axis('equal')
+
+        plt.draw()
 
     def orientFacets(self):
         """ Orient the facets so that the normal is consistent between faces """
@@ -483,23 +477,36 @@ class Mesh:
                     num_concave_facets += 1
                 else:
                     num_convex_facets += 1
-            print('Mesh : %d concave, %d convex' % (num_concave_facets, num_convex_facets))
             if num_concave_facets > num_convex_facets:
                 for facet in self.facets:
                     facet.vertices.reverse()
-            
         print("Oriented %d sub-mesh." % num_connected_meshes)
+
+    def create2DFacets(self):
+        """ Create 2D polygons from the 3D facets """
+        for facet in self.facets:
+            facet.project()
 
     def __str__(self) -> str:
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
         num_quads = len([facet for facet in self.facets if len(facet.vertices) == 4])
-        return 'Mesh %s : %d vertices, %d edges, %d facets (%d triangles, %d quads)' % (
-            self.name, len(self.vertices), len(self.edges), len(self.facets), num_triangles, num_quads)
+        num_poly2d = len([facet for facet in self.facets if facet.polygon2d])
+        return 'Mesh %s : %d vertices, %d edges, %d facets (%d triangles, %d quads), %d 2D polygons' % (
+            self.name, len(self.vertices), len(self.edges), len(self.facets), num_triangles, num_quads, num_poly2d)
 
     def __repr__(self):
         return self.__str__()
 
-with open('/tmp/mesh_export.json') as file:
+
+parser = argparse.ArgumentParser(description='Convert a mesh to a DXF file')
+parser.add_argument('json', type=str, help='The input JSON file')
+parser.add_argument('-d', '--dxf', type=str, help='The output DXF file')
+parser.add_argument('-p', '--plot', action='store_true', help='Plot the mesh')
+parser.add_argument('-m', '--mesh_name', type=str, action='append', help='The name of the mesh/meshes to convert')
+args = parser.parse_args()
+
+
+with open(args.json) as file:
     json_data = json.load(file)
 
 meshes = json_data['meshes']
@@ -508,9 +515,8 @@ for mesh in meshes:
     name = mesh['name']
     mesh_data = mesh['edges']
 
-    #if name != "Ear Right":
-    #    continue
-
+    if args.mesh_name and name not in args.mesh_name:
+        continue
 
     print(name)
     print("-" * len(name))
@@ -531,12 +537,17 @@ for mesh in meshes:
     # Orient the facets so that the normal is consistent between faces
     mesh.orientFacets()
 
+    # Generate all the 2D facets
+    mesh.create2DFacets()
+
+    # Current state of the mesh
     print(mesh)
 
-    mesh.plot()
-
-    # Project the polygons on a plane
-    #quads = [projectPolygon(quad) for quad in quads]
-
+    # Plot the mesh if required
+    if args.plot:
+        mesh.plot()
 
     print()
+
+if args.plot:
+    plt.show()
