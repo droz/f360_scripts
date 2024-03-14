@@ -3,8 +3,12 @@
 
 
 import json
+from itertools import chain
+import math
 from skspatial.objects import Plane, Vector, Point, Line
 import ezdxf
+from matplotlib import pyplot as plt
+import numpy as np
 
 class Vertex:
     """ This class is used to represent a vertex in th emesh graph"""
@@ -12,10 +16,42 @@ class Vertex:
         # The point coordinates
         self.point = Point(xyz)
         # The neighboor vertices
-        self.edges = []
+        self.neighboors = []
 
     def __str__(self):
-        return 'Vertex : (%f, %f, %f), %d edges' % (self.point[0], self.point[1], self.point[2], len(self.edges))
+        return 'Vertex : (%f, %f, %f), %d neighboors' % (self.point[0], self.point[1], self.point[2], len(self.neighboors))
+
+    def __repr__(self):
+        return self.__str__()
+
+class Edge:
+    """ This class is used to represent an edge in the mesh graph"""
+    def __init__(self, start : Vertex, end : Vertex):
+        # The start vertex
+        self.start = start
+        # The end vertex
+        self.end = end
+
+    def isSame(self, edge : 'Edge'):
+        """ Check if another edge is actually the same as this one.
+        Args:
+            edge: The edge to compare against
+        Returns:
+            True if the edges are the same, False otherwise
+        """
+        return (self.start == edge.start and self.end == edge.end) or (self.start == edge.end and self.end == edge.start)
+
+    def isInList(self, edges : list['Edge']):
+        """ Check if a facet is part of a list of edges, regardless of orientation.
+        Args:
+            edges: The list of edges to check against
+        Returns:
+            True if this edge is in the list, False otherwise
+        """
+        return any([self.isSame(list_edge) for list_edge in edges])
+
+    def __str__(self):
+        return 'Edge : %s -> %s' % (self.start, self.end)
 
     def __repr__(self):
         return self.__str__()
@@ -58,7 +94,7 @@ class Facet:
         return poly1 == poly2_rot1 or poly1 == poly2_rot2
 
     def isInList(self, facets : list['Facet']):
-        """ Check if a facet is part of a list of facet, regardless of start or orientation.
+        """ Check if a facet is part of a list of facets, regardless of start or orientation.
         Args:
             facets: The list of facets to check against
         Returns:
@@ -159,6 +195,31 @@ class Facet:
                 p2d += v2_b * (l3_b - l2_b) / l2_b
                 p2d -= v2_a * (l3_a - l2_a) / l2_a
 
+    def create2dProjection(self):
+        """ Compute the 2D shape that should be cut to generate this facet.
+        """
+        if len(self.vertices) < 3:
+            raise ValueError('Polygon with less than 3 points cannot be projected !!!')
+        # Start by fitting a plane to the polygon and projecting the points on it
+        poly3d = [vertex.point for vertex in self.vertices]
+        self.plane = Plane.best_fit(poly3d)
+        poly3d_proj = [plane.project_point(point) for point in poly3d]
+        # Now we need to define a coordinate frame. We'll use the first edge as x axis.
+        x = Vector(poly3d[1] - poly3d[0]).unit()
+        z = plane.normal
+        y = z.cross(x)
+        poly2d = []
+        for point in poly3d_proj:
+                v = Vector(point - plane.point)
+                px = x.scalar_projection(v)
+                py = y.scalar_projection(v)
+                poly2d.append(Point([px, py]))
+
+        # Find the best fit plane
+        plane = Plane.best_fit([vertex.point for vertex in polygon])
+        # Project the polygon on the plane
+        return [plane.project_point(vertex.point) for vertex in polygon]
+
     def __str__(self):
         return 'Facet : %d vertices' % len(self.vertices)
 
@@ -172,6 +233,8 @@ class Mesh:
         self.name = name
         # The vertices of the mesh
         self.vertices = []
+        # The edges in the mesh
+        self.edges = []
         # The facets of the mesh
         self.facets = []
 
@@ -202,8 +265,8 @@ class Mesh:
             end = self.maybeAddVertex(end)
 
             # Add the neighboors to the vertices
-            start.edges.append(end)
-            end.edges.append(start)
+            start.neighboors.append(end)
+            end.neighboors.append(start)
 
     def explorePath(self, path : list[ Vertex ], max_depth : int):
         """ This is used to explore a path within the mesh,
@@ -220,7 +283,7 @@ class Mesh:
         if len(path) > max_depth:
             return
         # Otherwise we explore the neighboors
-        for edge in path[-1].edges:
+        for edge in path[-1].neighboors:
             # If this is the previous vertex, skip it
             if len(path) > 1 and edge == path[-2]:
                 continue
@@ -237,10 +300,6 @@ class Mesh:
         new_quads = []
         for quad in quads:
             # Check if the quad is actually two triangles
-            #triangle1 = Facet([quad.vertices[0], quad.vertices[1], quad.vertices[3]])
-            #triangle2 = Facet([quad.vertices[1], quad.vertices[2], quad.vertices[3]])
-            #triangle3 = Facet([quad.vertices[0], quad.vertices[1], quad.vertices[2]])
-            #triangle4 = Facet([quad.vertices[0], quad.vertices[2], quad.vertices[3]])
             triangle1 = quad.subFacet([0, 1, 3])
             triangle2 = quad.subFacet([1, 2, 3])
             triangle3 = quad.subFacet([0, 1, 2])
@@ -254,6 +313,15 @@ class Mesh:
             new_quads.append(quad)
         self.facets = triangles + new_quads
 
+    def findEdges(self):
+        """ Find the edges in the mesh """
+        self.edges = []
+        for vertex in self.vertices:
+            for neighboor in vertex.neighboors:
+                edge = Edge(vertex, neighboor)
+                if not edge.isInList(self.edges):
+                    self.edges.append(edge)
+
     def findFacets(self, max_edges : int):
         """ Find the facets in the mesh.
 
@@ -261,7 +329,7 @@ class Mesh:
             max_edges: The maximum number of edges the polygons should have
         """
         # We are going to find the polygon by walking the graph and finding cycles
-        polygons = []
+        self.facets = []
         for vertex in self.vertices:
             self.explorePath([vertex], max_edges)
 
@@ -275,43 +343,54 @@ class Mesh:
             facets_no_dupes.append(facet)
         self.facets = facets_no_dupes
 
+    def plot(self):
+        """ Plot the mesh in 3D """
+        ax = plt.figure().add_subplot(projection='3d')
+        # The facets
+        for facet in self.facets:
+            if len(facet.vertices) == 3:
+                ptA = facet.vertices[0].point
+                ptB = facet.vertices[1].point
+                ptC = facet.vertices[2].point
+                xs = np.array([[ptA[0], ptB[0]], [ptC[0], math.nan]])
+                ys = np.array([[ptA[1], ptB[1]], [ptC[1], math.nan]])
+                zs = np.array([[ptA[2], ptB[2]], [ptC[2], math.nan]])
+            if len(facet.vertices) == 4:
+                ptA = facet.vertices[0].point
+                ptB = facet.vertices[1].point
+                ptC = facet.vertices[3].point
+                ptD = facet.vertices[2].point
+                xs = np.array([[ptA[0], ptB[0]], [ptC[0], ptD[0]]])
+                ys = np.array([[ptA[1], ptB[1]], [ptC[1], ptD[1]]])
+                zs = np.array([[ptA[2], ptB[2]], [ptC[2], ptD[2]]])
+            if len(facet.vertices) > 4:
+                continue
+            ax.plot_surface(xs, ys, zs, color='r', shade=False, alpha=0.5)
+        # The edges
+        xs = list(chain.from_iterable([edge.start.point[0], edge.end.point[0], math.nan] for edge in self.edges))
+        ys = list(chain.from_iterable([edge.start.point[1], edge.end.point[1], math.nan] for edge in self.edges))
+        zs = list(chain.from_iterable([edge.start.point[2], edge.end.point[2], math.nan] for edge in self.edges))
+        ax.plot(xs, ys, zs, 'k')
+        # The vertices
+        ax.scatter([vertex.point[0] for vertex in self.vertices],
+                   [vertex.point[1] for vertex in self.vertices],
+                   [vertex.point[2] for vertex in self.vertices], 'o')
+        ax.axis('equal')
+        ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax.grid(False)
+        plt.show()
+
+
     def __str__(self) -> str:
-        num_edges = sum([len(vertex.edges) for vertex in self.vertices]) / 2
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
         num_quads = len([facet for facet in self.facets if len(facet.vertices) == 4])
-        return 'Mesh %s : %d vertices, %d edges, %d facets (%d triangles, %d quads)' % (self.name, len(self.vertices), num_edges, len(self.facets), num_triangles, num_quads)
+        return 'Mesh %s : %d vertices, %d edges, %d facets (%d triangles, %d quads)' % (
+            self.name, len(self.vertices), len(self.edges), len(self.facets), num_triangles, num_quads)
 
     def __repr__(self):
         return self.__str__()
-
-def projectPolygon(polygon):
-    """ Project a polygon on a plane. It will use the most suitable plane.
-    Args:
-        polygon: The polygon to project, as a list of Vertex
-    Returns:
-        The projected polygon, as a list of new Vertices
-    """
-    if len(polygon) < 3:
-        raise ValueError('Polygon with less than 3 points cannot be projected !!!')
-    # Start by fitting a plane to the polygon and projecting the points on it
-    poly3d = [vertex.point for vertex in polygon]
-    plane = Plane.best_fit(poly3d)
-    poly3d_proj = [plane.project_point(point) for point in poly3d]
-    # Now we need to define a coordinate frame. We'll use the first edge as x axis.
-    x = Vector(poly3d[1] - poly3d[0]).unit()
-    z = plane.normal
-    y = z.cross(x)
-    poly2d = []
-    for point in poly3d_proj:
-            v = Vector(point - plane.point)
-            px = x.scalar_projection(v)
-            py = y.scalar_projection(v)
-            poly2d.append(Point([px, py]))
-
-    # Find the best fit plane
-    plane = Plane.best_fit([vertex.point for vertex in polygon])
-    # Project the polygon on the plane
-    return [plane.project_point(vertex.point) for vertex in polygon]
 
 with open('/tmp/mesh_export.json') as file:
     json_data = json.load(file)
@@ -321,12 +400,19 @@ meshes = json_data['meshes']
 for mesh in meshes:
     name = mesh['name']
     mesh_data = mesh['edges']
+
+    if name != "Ear Right":
+        continue
+
     print(name)
     print("-" * len(name))
 
     # Build a graph of this mesh
     mesh = Mesh(name)
     mesh.buildFromSegments(mesh_data)
+
+    # Find the edges in the mesh
+    mesh.findEdges()
 
     # Find the facets in the mesh3
     mesh.findFacets(4)
@@ -335,6 +421,8 @@ for mesh in meshes:
     mesh.removeRedundantQuads()
 
     print(mesh)
+
+    mesh.plot()
 
     # Project the polygons on a plane
     #quads = [projectPolygon(quad) for quad in quads]
