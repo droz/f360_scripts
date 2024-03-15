@@ -104,6 +104,8 @@ class Facet:
         self.origin2d = None
         # The index of the facet
         self.index = None
+        # The stitch hole distances from the edge of the facet
+        self.stitch_pullback_distance_m = None
 
 
     def subFacet(self, indexes : list[int]):
@@ -470,7 +472,7 @@ class Mesh:
                   [facet.plane.point[2] for facet in self.facets],
                   [facet.plane.normal[0] for facet in self.facets],
                   [facet.plane.normal[1] for facet in self.facets],
-                  [facet.plane.normal[2] for facet in self.facets], length=max_range * 0.1, color='b', alpha = 0.3)
+                  [facet.plane.normal[2] for facet in self.facets], length=max_range * 0.05, color='b', alpha = 0.3)
         # The facet indices if they exists
         for facet in self.facets:
             if facet.index is not None:
@@ -481,26 +483,22 @@ class Mesh:
         zs = list(chain.from_iterable([edge.start.point[2], edge.end.point[2], np.nan] for edge in self.edges))
         ax.plot(xs, ys, zs, 'k')
         # The stitches
-        xs = []
-        ys = []
-        zs = []
-        cs = []
+        dots = []
         for facet in self.facets:
             for edge, orientation in facet.edges:
+                edge_vec = Vector(edge.end.point - edge.start.point)
+                stitch_dir = facet.plane.normal.cross(edge_vec.unit())
                 if orientation:
                     stitches = edge.stitches_a
-                    color = 'r'
+                    stitch_dir = facet.plane.normal.cross(edge_vec.unit())
                 else:
                     stitches = edge.stitches_b
-                    color = 'g'
+                    stitch_dir = edge_vec.unit().cross(facet.plane.normal)
                 if stitches is not None:
-                    print('S %d %d %d' % (facet.index, len(stitches), orientation))
-                    vec = edge.end.point - edge.start.point
-                    xs += [edge.start.point[0] + l * vec[0] for l in stitches]
-                    ys += [edge.start.point[1] + l * vec[1] for l in stitches]
-                    zs += [edge.start.point[2] + l * vec[2] for l in stitches]
-                    cs += [color] * len(stitches)
-        ax.scatter(xs, ys, zs, c=cs, marker='o', s = 5)
+                    dots += [edge.start.point + l * edge_vec + stitch_dir * facet.stitch_edge_pullback_m for l in stitches]
+        ax.scatter([dot[0] for dot in dots],
+                   [dot[1] for dot in dots],
+                   [dot[2] for dot in dots], c='r', marker='o', s = 5)
         # The vertices
         ax.scatter([vertex.point[0] for vertex in self.vertices],
                    [vertex.point[1] for vertex in self.vertices],
@@ -617,16 +615,20 @@ class Mesh:
 
     def addStitchPoints(self, stitch_spacing_m : float = 0.1,
                                end_stitch_distance_m : float = 0.03,
-                               ab_stitch_spacing_m : float = 0.01):
+                               ab_stitch_spacing_m : float = 0.01,
+                               stitch_edge_pullback_m : float = 0.008):
         """ Add stitch points to the edges in the mesh.
         Args:
             stitch_spacing_m: The spacing between stitches
             end_stitch_distance_m: The distance from the ends towhere the first stitches should be
             ab_stitch_spacing_m: The spacing between A and B stitches 
         """
-        """ Add stitch points to all the edges """
+        # Add stitch points to all the edges
         for edge in self.edges:
             edge.addStitchPoints(stitch_spacing_m, end_stitch_distance_m, ab_stitch_spacing_m)
+        # Set the pullback distance on each facet
+        for facet in self.facets:
+            facet.stitch_edge_pullback_m = stitch_edge_pullback_m
 
     def writeDxf(self, filename : str):
         dxf = ezdxf.new('R2010')
