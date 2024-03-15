@@ -49,11 +49,6 @@ class Edge:
         self.start = start
         # The end vertex
         self.end = end
-        # The position of stitches on the edge, as a list of fractional positions on the edge
-        # A stitches are associated with the facet whose edge goes from start to end,
-        # and B stitches are associated with the facet whose edge goes from end to start.
-        self.stitches_a = None
-        self.stitches_b = None
 
     def isSame(self, edge : 'Edge'):
         """ Check if another edge is actually the same as this one.
@@ -73,30 +68,6 @@ class Edge:
         """
         return any([self.isSame(list_edge) for list_edge in edges])
 
-    def addStitchPoints(self, params : Parameters):
-        """ Add stitch points to the edge.
-        Args:
-            params: The parameters to use
-        """
-        length = Vector(self.end.point - self.start.point).norm()
-        # If the edge is too short to even add one pair of stitches, we don't add any
-        if length < 2 * params.ab_stitch_spacing_m:
-            self.stitches_a = []
-            self.stitches_b = []
-            return
-        length_left = length - 2 * params.end_stitch_distance_m - params.ab_stitch_spacing_m
-        num_stitches = np.floor(length_left / params.stitch_spacing_m + 0.5)
-        # If the edge is too short for two pairs of end stitches we only add one
-        if num_stitches < 1:
-            self.stitches_a = [0.5 + params.ab_stitch_spacing_m / (2 * length)]
-            self.stitches_b = [0.5 - params.ab_stitch_spacing_m / (2 * length)]
-            return
-        # OK, we have room for two pairs of end stitches, plus other stitches in the middle,
-        # compute how many and attempt to space them regularly
-        stitch_spacing_actual_m = length_left / num_stitches
-        self.stitches_a = np.arange(params.end_stitch_distance_m, length, stitch_spacing_actual_m) / length
-        self.stitches_b = self.stitches_a + params.ab_stitch_spacing_m / length
-
     def __str__(self):
         return 'Edge : %s -> %s' % (self.start, self.end)
 
@@ -108,7 +79,7 @@ class Facet:
     def __init__(self, vertices : list[Vertex]):
         # The vertices of the facet
         self.vertices = vertices
-        # The edges of the facet, as a list of tuples (edge, orientation)
+        # The edges of the facet, as a list of edges
         self.edges = None
         # The projected polygon, as a list of 2D points
         self.polygon2d = None
@@ -119,10 +90,11 @@ class Facet:
         self.contours2d = None
         # The index of the facet
         self.index = None
-        # The stitch hole distances from the edge of the facet
-        self.stitch_edge_pullback_m = None
-        # The contour pullback distance from the edge of the facet
-        self.contour_edge_pullback_m = None
+        # The list of stitch locations for each edge of the facet,
+        #  as a list of lists of fractional distances (0 is the start of the edge, 1 the end)
+        # Each location corresponds to a pair of (stitch hole, stitch relief).
+        # The location is the point in-between these two.
+        self.stitches = None
 
     def subFacet(self, indexes : list[int]):
         """ Create a sub-facet from a list of indexes.
@@ -192,15 +164,28 @@ class Facet:
         Args:
             edge: The edge to compare against
         Returns:
-            contains_edge: True if the edge is part of the facet, False otherwise
-            same_orientation: True if the edge is oriented the same way as the facet, False otherwise
+            True if the edge is part of the facet, False otherwise
         """
         for v1, v2 in zip(self.vertices, self.vertices[1:] + self.vertices[:1]):
-            if (v1 == edge.start and v2 == edge.end):
-                return True, True
-            if (v1 == edge.end and v2 == edge.start):
-                return True, False
+            if (v1 == edge.start and v2 == edge.end) or (v1 == edge.end and v2 == edge.start):
+                return True
         return False, None
+
+    def findEdge(self, vertex1 : Vertex, vertex2 : Vertex):
+        """ Find an edge between two vertices.
+        Args:
+            vertex1: The first vertex
+            vertex2: The second vertex
+        Returns:
+            The edge if it exists, None otherwise
+            The orientation of the edge, True if it goes from vertex1 to vertex2, False otherwise
+        """
+        for edge in self.edges:
+            if edge.start == vertex1 and edge.end == vertex2:
+                return edge, True
+            if edge.start == vertex2 and edge.end == vertex1:
+                return edge, False
+        return None
 
     def center(self):
         """ Return the center of the facet """
@@ -212,8 +197,6 @@ class Facet:
     def flip(self):
         """ Flip the orientation of the facet """
         self.vertices.reverse()
-        for i in range(len(self.edges)):
-            self.edges[i] = (self.edges[i][0], not self.edges[i][1])
 
     def adjustPoint(self, index):
         """ Adjust a 2d point to make the edges lengths match between 2d and 3d.
@@ -300,6 +283,29 @@ class Facet:
         if sum(local_normal_fit) < 0:
             self.plane.normal = - self.plane.normal
 
+    def addStitchPoints(self, params : Parameters):
+        """ Add stitch points to the facet.
+        Args:
+            params: The parameters to use
+        """
+        self.stitches = []
+        for v1, v2 in zip(self.vertices, self.vertices[1:] + self.vertices[:1]):
+            length = Vector(v2.point - v1.point).norm()
+            # If the edge is too short to even add one pair of stitches, we don't add any
+            if length < 2 * params.ab_stitch_spacing_m:
+                self.stitches.append([])
+                continue    
+            length_left = length - 2 * params.end_stitch_distance_m
+            num_stitches = np.floor(length_left / params.stitch_spacing_m + 0.5)
+            # If the edge is too short for two pairs of end stitches we only add one
+            if num_stitches < 1:
+                self.stitches.append([0.5])
+                continue
+            # OK, we have room for two pairs of end stitches, plus other stitches in the middle,
+            # compute how many and attempt to space them regularly
+            stitch_spacing_actual_m = length_left / num_stitches
+            self.stitches.append(list(np.arange(params.end_stitch_distance_m, length, stitch_spacing_actual_m) / length))
+
     def offsetPoints2D(self, edge_index : int, along_edge_m : list[float], across_edge_m : list[float]):
         """ Offset the 2D points relative to an edge
         Args:
@@ -312,6 +318,19 @@ class Facet:
         cross_dir = Vector([-edge_dir[1], edge_dir[0]])
         assert len(along_edge_m) == len(across_edge_m)
         return [self.polygon2d[edge_index] + edge_dir * along_edge_m[i] + cross_dir * across_edge_m[i] for i in range(len(along_edge_m))]
+
+    def offsetPoints3D(self, edge_index : int, along_edge_m : list[float], across_edge_m : list[float]):
+        """ Offset the 3D points relative to an edge
+        Args:
+            edge_index: The index of the edge to offset from
+            along_edge_m: The distance along the edge, in meters
+            across_edge_m: The distance across the edge, in meters
+        """
+        next_edge_index = (edge_index + 1) % len(self.vertices)
+        edge_dir = Vector(self.vertices[next_edge_index].point - self.vertices[edge_index].point).unit()
+        cross_dir = self.plane.normal.cross(edge_dir)
+        assert len(along_edge_m) == len(across_edge_m)
+        return [self.vertices[edge_index].point + edge_dir * along_edge_m[i] + cross_dir * across_edge_m[i] for i in range(len(along_edge_m))]
 
     def generateContours(self):
         """ Generate 2D contours from the 2D polygon """
@@ -331,14 +350,32 @@ class Facet:
             rod_pullback_distance = params.skeleton_rod_diameter_m / 2 / np.tan(angle / 2)
             cut_distances.append(max(chamfer_distance, rod_pullback_distance))
 
-        # We start by offseting the polygon to compensate for the rod diameter
         panel_contour = []
         for i in range(num_vertices):
             l = Vector(self.polygon2d[(i+1) % num_vertices] - self.polygon2d[i]).norm()
             d0 = cut_distances[i]
             d1 = cut_distances[(i+1) % num_vertices]
+            # Compute the two end-points
             p0, p1 = self.offsetPoints2D(i, [0 + d0, l - d1], [params.skeleton_rod_diameter_m / 2] * 2)
-            panel_contour += [p0, p1]
+            # Then the stitch clearance points for the edge
+            #edge = 
+
+
+        #     for edge, orientation in facet.edges:
+        #         edge_vec = Vector(edge.end.point - edge.start.point)
+        #         stitch_dir = facet.plane.normal.cross(edge_vec.unit())
+        #         if orientation:
+        #             stitches = edge.stitches_a
+        #             stitch_dir = facet.plane.normal.cross(edge_vec.unit())
+        #         else:
+        #             stitches = edge.stitches_b
+        #             stitch_dir = edge_vec.unit().cross(facet.plane.normal)
+        #         if stitches is not None:
+        #             dots += [edge.start.point + l * edge_vec + stitch_dir * self.params.stitch_edge_pullback_m for l in stitches]
+        # ax.scatter([dot[0] for dot in dots],
+        #            [dot[1] for dot in dots],
+        #            [dot[2] for dot in dots], c='g', marker='o', s = 5)
+        #     panel_contour += [p0, p1]
         self.contours2d = [panel_contour]
 
     def __str__(self):
@@ -450,9 +487,8 @@ class Mesh:
         for facet in self.facets:
             facet.edges = []
             for edge in self.edges:
-                contains_edge, orientation = facet.containsEdge(edge)
-                if contains_edge:
-                    facet.edges.append((edge, orientation))
+                if facet.containsEdge(edge):
+                    facet.edges.append(edge)
 
         print('Found %d edges' % len(self.edges))
 
@@ -538,17 +574,18 @@ class Mesh:
         # The stitches
         dots = []
         for facet in self.facets:
-            for edge, orientation in facet.edges:
-                edge_vec = Vector(edge.end.point - edge.start.point)
-                stitch_dir = facet.plane.normal.cross(edge_vec.unit())
-                if orientation:
-                    stitches = edge.stitches_a
-                    stitch_dir = facet.plane.normal.cross(edge_vec.unit())
-                else:
-                    stitches = edge.stitches_b
-                    stitch_dir = edge_vec.unit().cross(facet.plane.normal)
-                if stitches is not None:
-                    dots += [edge.start.point + l * edge_vec + stitch_dir * self.params.stitch_edge_pullback_m for l in stitches]
+            if not facet.stitches:
+                continue
+            for i in range(len(facet.vertices)):
+                v1 = facet.vertices[i]
+                v2 = facet.vertices[(i+1) % len(facet.vertices)]
+                length = Vector(v2.point - v1.point).norm()
+                stitches = facet.stitches[i]
+                if not stitches:
+                    continue
+                dots += facet.offsetPoints3D(i,
+                                             [r * length + self.params.ab_stitch_spacing_m / 2 for r in stitches],
+                                             [self.params.stitch_edge_pullback_m] * len(stitches))
         ax.scatter([dot[0] for dot in dots],
                    [dot[1] for dot in dots],
                    [dot[2] for dot in dots], c='g', marker='o', s = 5)
@@ -579,9 +616,10 @@ class Mesh:
             # The contours if they exist
             if facet.contours2d:
                 for contour in facet.contours2d:
-                    xs = [point[0] + facet.origin2d[0] for point in contour]
-                    ys = [point[1] + facet.origin2d[1] for point in contour]
-                    ax.plot(xs + [xs[0]], ys + [ys[0]], 'b')
+                    if contour:
+                        xs = [point[0] + facet.origin2d[0] for point in contour]
+                        ys = [point[1] + facet.origin2d[1] for point in contour]
+                        ax.plot(xs + [xs[0]], ys + [ys[0]], 'b')
         ax.axis('equal')
 
         plt.draw()
@@ -646,8 +684,7 @@ class Mesh:
         for index, facet in enumerate(self.facets):
             facet.index = index
 
-    def generate2DContours(self, stitch_edge_pullback_m : float = 0.01,
-                               contour_edge_pullback_m : float = 0.01):
+    def generate2DContours(self):
         """ Create 2D contours from the 3D facets """
         for facet in self.facets:
             # Start by projecting all the facets
@@ -677,10 +714,10 @@ class Mesh:
                 row += 1
 
     def addStitchPoints(self):
-        """ Add stitch points to the edges in the mesh. """
-        # Add stitch points to all the edges
-        for edge in self.edges:
-            edge.addStitchPoints(self.params)
+        """ Add stitch points to the facets in the mesh. """
+        # We go over each facet to ad stitch points
+        for facet in self.facets:
+            facet.addStitchPoints(self.params)
 
     def writeDxf(self, filename : str):
         dxf = ezdxf.new('R2010')
