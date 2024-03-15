@@ -4,7 +4,6 @@
 
 import json
 from itertools import chain
-import math
 from skspatial.objects import Plane, Vector, Point, Line
 import ezdxf
 from matplotlib import pyplot as plt
@@ -32,6 +31,11 @@ class Edge:
         self.start = start
         # The end vertex
         self.end = end
+        # The position of stitches on the edge, as a list of fractional positions on the edge
+        # A stitches are associated with the facet whose edge goes from start to end,
+        # and B stitches are associated with the facet whose edge goes from end to start.
+        self.stitches_a = None
+        self.stitches_b = None
 
     def isSame(self, edge : 'Edge'):
         """ Check if another edge is actually the same as this one.
@@ -51,6 +55,36 @@ class Edge:
         """
         return any([self.isSame(list_edge) for list_edge in edges])
 
+    def addStitchPoints(self, stitch_spacing_m : float,
+                              end_stitch_distance_m : float,
+                              ab_stitch_spacing_m : float):
+        """ Add stitch points to the edge.
+        Args:
+            stitch_spacing_m: The spacing between stitches
+            end_stitch_distance_m: The distance from the ends towhere the first stitches should be
+            ab_stitch_spacing_m: The spacing between A and B stitches 
+        """
+        length = Vector(self.end.point - self.start.point).norm()
+        # If the edge is too short to even add one pair of stitches, we don't add any
+        if length < 2 * end_stitch_distance_m + ab_stitch_spacing_m:
+            self.stitches_a = []
+            self.stitches_b = []
+            return
+        # If the edge is too short for two pairs of end stitches we only add one
+        if length < 2 * end_stitch_distance_m + 4 * ab_stitch_spacing_m:
+            self.stitches_a = [0.5 + ab_stitch_spacing_m / (2 * length)]
+            self.stitches_b = [0.5 - ab_stitch_spacing_m / (2 * length)]
+            return
+        # OK, we have room for two pairs of end stitches, plus other stitches in the middle,
+        # compute how many and attempt to space them regularly
+        length_left = length - 2 * end_stitch_distance_m - ab_stitch_spacing_m
+        if length_left < ab_stitch_spacing_m:
+            raise ValueError('%s is too short to add stitches !!!. Edge length is %fm' % (self, length))
+        num_stitches = np.floor(length_left / stitch_spacing_m + 0.5)
+        stitch_spacing_actual_m = length_left / num_stitches
+        self.stitches_a = np.arange(end_stitch_distance_m, length, stitch_spacing_actual_m) / length
+        self.stitches_b = self.stitches_a + ab_stitch_spacing_m / length
+
     def __str__(self):
         return 'Edge : %s -> %s' % (self.start, self.end)
 
@@ -62,8 +96,15 @@ class Facet:
     def __init__(self, vertices : list[Vertex]):
         # The vertices of the facet
         self.vertices = vertices
+        # The edges of the facet, as a list of tuples (edge, orientation)
+        self.edges = None
         # The projected polygon, as a list of 2D points
         self.polygon2d = None
+        # The origin of the 2D representation of the facet
+        self.origin2d = None
+        # The index of the facet
+        self.index = None
+
 
     def subFacet(self, indexes : list[int]):
         """ Create a sub-facet from a list of indexes.
@@ -127,6 +168,34 @@ class Facet:
                 if (v1l == v2 and v2l == v1):
                     return True, True
         return False, None
+
+    def containsEdge(self, edge : Edge):
+        """ Check if an edge is part of the facet.
+        Args:
+            edge: The edge to compare against
+        Returns:
+            contains_edge: True if the edge is part of the facet, False otherwise
+            same_orientation: True if the edge is oriented the same way as the facet, False otherwise
+        """
+        for v1, v2 in zip(self.vertices, self.vertices[1:] + self.vertices[:1]):
+            if (v1 == edge.start and v2 == edge.end):
+                return True, True
+            if (v1 == edge.end and v2 == edge.start):
+                return True, False
+        return False, None
+
+    def center(self):
+        """ Return the center of the facet """
+        x = self.plane.point[0]
+        y = self.plane.point[1]
+        z = self.plane.point[2]
+        return x, y, z
+
+    def Flip(self):
+        """ Flip the orientation of the facet """
+        self.vertices.reverse()
+        for i in range(len(self.edges)):
+            self.edges[i] = (self.edges[i][0], not self.edges[i][1])
 
     def adjustPoint(self, index):
         """ Adjust a 2d point to make the edges lengths match between 2d and 3d.
@@ -316,6 +385,14 @@ class Mesh:
                 edge = Edge(vertex, neighboor)
                 if not edge.isInList(self.edges):
                     self.edges.append(edge)
+        # Associate edges to each facets
+        for facet in self.facets:
+            facet.edges = []
+            for edge in self.edges:
+                contains_edge, orientation = facet.containsEdge(edge)
+                if contains_edge:
+                    facet.edges.append((edge, orientation))
+
         print('Found %d edges' % len(self.edges))
 
     def findFacets(self, max_edges : int):
@@ -338,6 +415,7 @@ class Mesh:
                 continue
             facets_no_dupes.append(facet)
         self.facets = facets_no_dupes
+
         print('Found %d facets' % len(self.facets))
 
     def plot(self):
@@ -359,14 +437,20 @@ class Mesh:
         max_range = max([max_x - min_x, max_y - min_y, max_z - min_z])
 
         # The facets
+        xos_arrow = []
+        yos_arrow = []
+        zos_arrow = []
+        xds_arrow = []
+        yds_arrow = []
+        zds_arrow = []
         for facet in self.facets:
             if len(facet.vertices) == 3:
                 ptA = facet.vertices[0].point
                 ptB = facet.vertices[1].point
                 ptC = facet.vertices[2].point
-                xs = np.array([[ptA[0], ptB[0]], [ptC[0], math.nan]])
-                ys = np.array([[ptA[1], ptB[1]], [ptC[1], math.nan]])
-                zs = np.array([[ptA[2], ptB[2]], [ptC[2], math.nan]])
+                xs = np.array([[ptA[0], ptB[0]], [ptC[0], np.nan]])
+                ys = np.array([[ptA[1], ptB[1]], [ptC[1], np.nan]])
+                zs = np.array([[ptA[2], ptB[2]], [ptC[2], np.nan]])
             if len(facet.vertices) == 4:
                 ptA = facet.vertices[0].point
                 ptB = facet.vertices[1].point
@@ -377,54 +461,70 @@ class Mesh:
                 zs = np.array([[ptA[2], ptB[2]], [ptC[2], ptD[2]]])
             if len(facet.vertices) > 4:
                 continue
-            ax.plot_surface(xs, ys, zs, color='r', shade=False, alpha=0.5)
-            # The normal
+            ax.plot_surface(xs, ys, zs, color='r', shade=False, alpha=0.4)
+        # The normals
+        for facet in self.facets:
             facet.fitPlane()
-            normal = facet.plane.normal
-            origin = facet.plane.point
-            ax.quiver(origin[0], origin[1], origin[2], normal[0], normal[1], normal[2], length=max_range * 0.05, color='k', alpha = 0.5)
+        ax.quiver([facet.plane.point[0] for facet in self.facets],
+                  [facet.plane.point[1] for facet in self.facets],
+                  [facet.plane.point[2] for facet in self.facets],
+                  [facet.plane.normal[0] for facet in self.facets],
+                  [facet.plane.normal[1] for facet in self.facets],
+                  [facet.plane.normal[2] for facet in self.facets], length=max_range * 0.1, color='b', alpha = 0.3)
+        # The facet indices if they exists
+        for facet in self.facets:
+            if facet.index is not None:
+                ax.text(facet.plane.point[0], facet.plane.point[1], facet.plane.point[2], '%d' % facet.index, color='k', horizontalalignment='center', verticalalignment='center', weight='bold')
         # The edges
-        xs = list(chain.from_iterable([edge.start.point[0], edge.end.point[0], math.nan] for edge in self.edges))
-        ys = list(chain.from_iterable([edge.start.point[1], edge.end.point[1], math.nan] for edge in self.edges))
-        zs = list(chain.from_iterable([edge.start.point[2], edge.end.point[2], math.nan] for edge in self.edges))
+        xs = list(chain.from_iterable([edge.start.point[0], edge.end.point[0], np.nan] for edge in self.edges))
+        ys = list(chain.from_iterable([edge.start.point[1], edge.end.point[1], np.nan] for edge in self.edges))
+        zs = list(chain.from_iterable([edge.start.point[2], edge.end.point[2], np.nan] for edge in self.edges))
         ax.plot(xs, ys, zs, 'k')
+        # The stitches
+        xs = []
+        ys = []
+        zs = []
+        cs = []
+        for facet in self.facets:
+            for edge, orientation in facet.edges:
+                if orientation:
+                    stitches = edge.stitches_a
+                    color = 'r'
+                else:
+                    stitches = edge.stitches_b
+                    color = 'g'
+                if stitches is not None:
+                    print('S %d %d %d' % (facet.index, len(stitches), orientation))
+                    vec = edge.end.point - edge.start.point
+                    xs += [edge.start.point[0] + l * vec[0] for l in stitches]
+                    ys += [edge.start.point[1] + l * vec[1] for l in stitches]
+                    zs += [edge.start.point[2] + l * vec[2] for l in stitches]
+                    cs += [color] * len(stitches)
+        ax.scatter(xs, ys, zs, c=cs, marker='o', s = 5)
         # The vertices
         ax.scatter([vertex.point[0] for vertex in self.vertices],
                    [vertex.point[1] for vertex in self.vertices],
                    [vertex.point[2] for vertex in self.vertices], 'o')
-        ax.dist = ax.dist * 0.6
+        ax.set_box_aspect(None, zoom=1.7)
         ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.grid(False)
         ax.axis('equal')
         ax.axis('off')
+        ax.azim = 45
 
         # 2D view
         ax = fig.add_subplot(1, 2, 2)
-        facets = [facet for facet in self.facets if facet.polygon2d]
-        rows = math.ceil(math.sqrt(len(facets)))
-        facet_widths = []
-        facet_heights = []
-        for facet in facets:
-            xs = [point[0] for point in facet.polygon2d]
-            ys = [point[1] for point in facet.polygon2d]
-            facet_widths.append(max(xs) - min(xs))
-            facet_heights.append(max(ys) - min(ys))
-        max_width = max(facet_widths)
-        max_height = max(facet_heights)
-        row = 0
-        col = 0
         for facet in self.facets:
             if not facet.polygon2d:
                 continue
-            xs = [point[0] + max_width * 1.05 * col for point in facet.polygon2d]
-            ys = [point[1] + max_height * 1.05 * row for point in facet.polygon2d] 
-            col += 1
-            if col == rows:
-                col = 0
-                row += 1
+            xs = [point[0] + facet.origin2d[0] for point in facet.polygon2d]
+            ys = [point[1] + facet.origin2d[1] for point in facet.polygon2d] 
             ax.plot(xs + [xs[0]], ys + [ys[0]], 'r')
+            # The index if it exists
+            if facet.index is not None:
+                ax.text(facet.origin2d[0], facet.origin2d[1], '%d' % facet.index, color='k', horizontalalignment='center', verticalalignment='center')
         ax.axis('equal')
 
         plt.draw()
@@ -448,7 +548,7 @@ class Mesh:
                     if not share_side:
                         continue
                     if not same_orientation:
-                        neighboor.vertices.reverse()
+                        neighboor.Flip()
                     new_oriented_facets.add(neighboor)
                     oriented_facets.add(neighboor)
                 unoriented_facets = unoriented_facets - new_oriented_facets
@@ -479,13 +579,64 @@ class Mesh:
                     num_convex_facets += 1
             if num_concave_facets > num_convex_facets:
                 for facet in self.facets:
-                    facet.vertices.reverse()
+                    facet.Flip()
         print("Oriented %d sub-mesh." % num_connected_meshes)
+
+    def indexFacets(self):
+        """ Assign indexes to the facets """
+        # Sort facets based on x, y, and z coordinates
+        self.facets.sort(key=lambda facet: facet.center())
+        for index, facet in enumerate(self.facets):
+            facet.index = index
 
     def create2DFacets(self):
         """ Create 2D polygons from the 3D facets """
         for facet in self.facets:
             facet.project()
+
+        # Generate offsets to layout the 2D polygons on a grid
+        rows = np.ceil(np.sqrt(len(self.facets)))
+        # Extract the widths and heights of the facets
+        facet_widths = []
+        facet_heights = []
+        for facet in self.facets:
+            xs = [point[0] for point in facet.polygon2d]
+            ys = [point[1] for point in facet.polygon2d]
+            facet_widths.append(max(xs) - min(xs))
+            facet_heights.append(max(ys) - min(ys))
+        max_width = max(facet_widths)
+        max_height = max(facet_heights)
+        row = 0
+        col = 0
+        for facet in self.facets:
+            facet.origin2d = Point([max_width * col * 1.05, max_height * row * 1.05])
+            col += 1
+            if col == rows:
+                col = 0
+                row += 1
+
+    def addStitchPoints(self, stitch_spacing_m : float = 0.1,
+                               end_stitch_distance_m : float = 0.03,
+                               ab_stitch_spacing_m : float = 0.01):
+        """ Add stitch points to the edges in the mesh.
+        Args:
+            stitch_spacing_m: The spacing between stitches
+            end_stitch_distance_m: The distance from the ends towhere the first stitches should be
+            ab_stitch_spacing_m: The spacing between A and B stitches 
+        """
+        """ Add stitch points to all the edges """
+        for edge in self.edges:
+            edge.addStitchPoints(stitch_spacing_m, end_stitch_distance_m, ab_stitch_spacing_m)
+
+    def writeDxf(self, filename : str):
+        dxf = ezdxf.new('R2010')
+        msp = dxf.modelspace()
+        for facet in mesh.facets:
+            if not facet.polygon2d:
+                continue
+            msp.add_lwpolyline([(point + facet.origin2d) * 1000 for point in facet.polygon2d], close=True)
+            msp.add_lwpolyline([(point * 0.5 + facet.origin2d) * 1000 for point in facet.polygon2d][::-1], close=True)
+        dxf.saveas(filename)
 
     def __str__(self) -> str:
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
@@ -525,11 +676,11 @@ for mesh in meshes:
     mesh = Mesh(name)
     mesh.buildFromSegments(mesh_data)
 
-    # Find the edges in the mesh
-    mesh.findEdges()
-
     # Find the facets in the mesh3
     mesh.findFacets(4)
+
+    # Find the edges in the mesh
+    mesh.findEdges()
 
     # Remove the redundant quads (those that are made of two existing triangles)
     mesh.removeRedundantQuads()
@@ -537,8 +688,18 @@ for mesh in meshes:
     # Orient the facets so that the normal is consistent between faces
     mesh.orientFacets()
 
+    # Add stitch points to all the edges
+    mesh.addStitchPoints()
+
+    # Assign indexes to the facets
+    mesh.indexFacets()
+
     # Generate all the 2D facets
     mesh.create2DFacets()
+
+    # Export DXF if required
+    if args.dxf:
+        mesh.writeDxf(args.dxf)
 
     # Current state of the mesh
     print(mesh)
@@ -546,6 +707,7 @@ for mesh in meshes:
     # Plot the mesh if required
     if args.plot:
         mesh.plot()
+
 
     print()
 

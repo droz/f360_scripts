@@ -40,16 +40,17 @@ def run(context):
                     json += '    { "name" : "' + part_name + '",\n'
                     json += '      "edges" : [\n'
                     for edge in sketch.sketchCurves.sketchLines:
-                        # When we export the coordinates, we switch to a Z up coordinate frame
-                        x_start_mm = units.convert(edge.geometry.startPoint.z, units.defaultLengthUnits, 'm')
-                        y_start_mm = units.convert(edge.geometry.startPoint.x, units.defaultLengthUnits, 'm')
-                        z_start_mm = units.convert(edge.geometry.startPoint.y, units.defaultLengthUnits, 'm')
-                        x_end_mm = units.convert(edge.geometry.endPoint.z, units.defaultLengthUnits, 'm')
-                        y_end_mm = units.convert(edge.geometry.endPoint.x, units.defaultLengthUnits, 'm')
-                        z_end_mm = units.convert(edge.geometry.endPoint.y, units.defaultLengthUnits, 'm')
+                        # When we export the coordinates, we switch to a Z up coordinate frame.
+                        # Fusion uses cm as internal units, so we convert to meters.
+                        x_start_m = edge.geometry.startPoint.z * 0.01
+                        y_start_m = edge.geometry.startPoint.x * 0.01
+                        z_start_m = edge.geometry.startPoint.y * 0.01
+                        x_end_m = edge.geometry.endPoint.z * 0.01
+                        y_end_m = edge.geometry.endPoint.x * 0.01
+                        z_end_m = edge.geometry.endPoint.y * 0.01
                         json += '        { "start" : [%f, %f, %f], "end" : [%f, %f, %f] },\n' % (
-                                 x_start_mm, y_start_mm, z_start_mm,
-                                 x_end_mm, y_end_mm, z_end_mm)
+                                 x_start_m, y_start_m, z_start_m,
+                                 x_end_m, y_end_m, z_end_m)
                     json = json[:-2] + '\n      ]\n'
                     json += '    },\n'
 
