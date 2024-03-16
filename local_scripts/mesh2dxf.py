@@ -21,7 +21,11 @@ class Parameters:
     # The spacing between stitches for the panels on each side of the edge
     ab_stitch_spacing_m : float = 0.01
     # The distance from the edge of the facet to the stitch holes
-    stitch_edge_pullback_m : float = 0.01
+    stitch_hole_pullback_m : float = 0.006
+    # The width of a stitch hole
+    stitch_hole_width_m : float = 0.005
+    # The height of a stitch hole
+    stitch_hole_height_m : float = 0.003
     # The diameter of the rods used for the structure
     skeleton_rod_diameter_m : float = 0.00635
     # The clearance between the chamfer at the corner of the panels and
@@ -306,31 +310,29 @@ class Facet:
             stitch_spacing_actual_m = length_left / num_stitches
             self.stitches.append(list(np.arange(params.end_stitch_distance_m, length, stitch_spacing_actual_m) / length))
 
-    def offsetPoints2D(self, edge_index : int, along_edge_m : list[float], across_edge_m : list[float]):
+    def offsetPoints2D(self, edge_index : int, coords : list[Point]):
         """ Offset the 2D points relative to an edge
         Args:
             edge_index: The index of the edge to offset from
-            along_edge_m: The distance along the edge, in meters
-            across_edge_m: The distance across the edge, in meters
+            offset_coords: The offset coordinates (x is the distance along the edge,
+                           y is the offset distance inside the facet)
         """
         next_edge_index = (edge_index + 1) % len(self.vertices)
         edge_dir = Vector(self.polygon2d[next_edge_index] - self.polygon2d[edge_index]).unit()
         cross_dir = Vector([-edge_dir[1], edge_dir[0]])
-        assert len(along_edge_m) == len(across_edge_m)
-        return [self.polygon2d[edge_index] + edge_dir * along_edge_m[i] + cross_dir * across_edge_m[i] for i in range(len(along_edge_m))]
+        return [self.polygon2d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
 
-    def offsetPoints3D(self, edge_index : int, along_edge_m : list[float], across_edge_m : list[float]):
+    def offsetPoints3D(self, edge_index : int, coords : list[Point]):
         """ Offset the 3D points relative to an edge
         Args:
             edge_index: The index of the edge to offset from
-            along_edge_m: The distance along the edge, in meters
-            across_edge_m: The distance across the edge, in meters
+            offset_coords: The offset coordinates (x is the distance along the edge,
+                           y is the offset distance inside the facet)
         """
         next_edge_index = (edge_index + 1) % len(self.vertices)
         edge_dir = Vector(self.vertices[next_edge_index].point - self.vertices[edge_index].point).unit()
         cross_dir = self.plane.normal.cross(edge_dir)
-        assert len(along_edge_m) == len(across_edge_m)
-        return [self.vertices[edge_index].point + edge_dir * along_edge_m[i] + cross_dir * across_edge_m[i] for i in range(len(along_edge_m))]
+        return [self.vertices[edge_index].point + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
 
     def generateContours(self):
         """ Generate 2D contours from the 2D polygon """
@@ -350,33 +352,42 @@ class Facet:
             rod_pullback_distance = params.skeleton_rod_diameter_m / 2 / np.tan(angle / 2)
             cut_distances.append(max(chamfer_distance, rod_pullback_distance))
 
+        inset = params.skeleton_rod_diameter_m / 2
+        pullback = params.stitch_hole_pullback_m
+        shift = params.ab_stitch_spacing_m / 2
+        width = params.stitch_hole_width_m
+        height = params.stitch_hole_height_m
         panel_contour = []
+        self.contours2d = []
         for i in range(num_vertices):
-            l = Vector(self.polygon2d[(i+1) % num_vertices] - self.polygon2d[i]).norm()
+            length = Vector(self.polygon2d[(i+1) % num_vertices] - self.polygon2d[i]).norm()
             d0 = cut_distances[i]
             d1 = cut_distances[(i+1) % num_vertices]
             # Compute the two end-points
-            p0, p1 = self.offsetPoints2D(i, [0 + d0, l - d1], [params.skeleton_rod_diameter_m / 2] * 2)
+            p0, p1 = self.offsetPoints2D(i, [(0 + d0, inset), (length - d1, inset)])
             # Then the stitch clearance points for the edge
-            #edge = 
+            stitches = self.stitches[i]
+            if not stitches:
+                continue
+            ps = [None] * len(stitches) * 4
+            ps[0::4] = self.offsetPoints2D(i, [(stitch * length - shift - width / 2, inset) for stitch in stitches])
+            ps[1::4] = self.offsetPoints2D(i, [(stitch * length - shift - width / 2, inset + height) for stitch in stitches])
+            ps[2::4] = self.offsetPoints2D(i, [(stitch * length - shift + width / 2, inset + height) for stitch in stitches])
+            ps[3::4] = self.offsetPoints2D(i, [(stitch * length - shift + width / 2, inset) for stitch in stitches])
+            panel_contour += [p0] + ps + [p1]
+            # Then the holes for the stitches
+            for stitch in stitches:
+                hole_coords = [(stitch * length + shift - width / 2, inset + pullback),
+                               (stitch * length + shift - width / 2, inset + pullback + height),
+                               (stitch * length + shift + width / 2, inset + pullback + height),
+                               (stitch * length + shift + width / 2, inset + pullback)]
+                ph = self.offsetPoints2D(i, hole_coords)
+                self.contours2d.append(ph)
 
+        # We may have ended up with zero length segments, remove them here
+        panel_contour = [panel_contour[i] for i in range(len(panel_contour)) if panel_contour[i].distance_point(panel_contour[(i + 1) % len(panel_contour)]) > 1e-6]
 
-        #     for edge, orientation in facet.edges:
-        #         edge_vec = Vector(edge.end.point - edge.start.point)
-        #         stitch_dir = facet.plane.normal.cross(edge_vec.unit())
-        #         if orientation:
-        #             stitches = edge.stitches_a
-        #             stitch_dir = facet.plane.normal.cross(edge_vec.unit())
-        #         else:
-        #             stitches = edge.stitches_b
-        #             stitch_dir = edge_vec.unit().cross(facet.plane.normal)
-        #         if stitches is not None:
-        #             dots += [edge.start.point + l * edge_vec + stitch_dir * self.params.stitch_edge_pullback_m for l in stitches]
-        # ax.scatter([dot[0] for dot in dots],
-        #            [dot[1] for dot in dots],
-        #            [dot[2] for dot in dots], c='g', marker='o', s = 5)
-        #     panel_contour += [p0, p1]
-        self.contours2d = [panel_contour]
+        self.contours2d.append(panel_contour)
 
     def __str__(self):
         return 'Facet : %d vertices' % len(self.vertices)
@@ -583,9 +594,7 @@ class Mesh:
                 stitches = facet.stitches[i]
                 if not stitches:
                     continue
-                dots += facet.offsetPoints3D(i,
-                                             [r * length + self.params.ab_stitch_spacing_m / 2 for r in stitches],
-                                             [self.params.stitch_edge_pullback_m] * len(stitches))
+                dots += facet.offsetPoints3D(i, [(r * length + self.params.ab_stitch_spacing_m / 2, self.params.stitch_hole_pullback_m) for r in stitches])
         ax.scatter([dot[0] for dot in dots],
                    [dot[1] for dot in dots],
                    [dot[2] for dot in dots], c='g', marker='o', s = 5)
