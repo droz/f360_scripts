@@ -30,7 +30,7 @@ class Parameters:
     skeleton_rod_diameter_m : float = 0.00635
     # The clearance between the chamfer at the corner of the panels and
     # the corner vertex
-    corner_chamfer_clearance_m : float = 0.01
+    corner_chamfer_clearance_m : float = 0.005
 
 class Vertex:
     """ This class is used to represent a vertex in the mesh graph"""
@@ -293,22 +293,40 @@ class Facet:
             params: The parameters to use
         """
         self.stitches = []
-        for v1, v2 in zip(self.vertices, self.vertices[1:] + self.vertices[:1]):
+        for v0, v1, v2, v3 in zip(self.vertices[-1:] + self.vertices[:-1],
+                                  self.vertices,
+                                  self.vertices[1:] + self.vertices[:1],
+                                  self.vertices[2:] + self.vertices[:2]):
             length = Vector(v2.point - v1.point).norm()
+            # We need to figure out where we are going to place the first and last stitches.
+            # This will depend on the angle of the edge with the previous and next edges.
+            ve0 = Vector(v0.point - v1.point).unit()
+            ve1 = Vector(v2.point - v1.point).unit()
+            ve2 = Vector(v2.point - v3.point).unit()
+            angle1 = np.abs(ve0.angle_between(ve1))
+            angle2 = np.abs(ve1.angle_between(ve2))
+            pullback = params.skeleton_rod_diameter_m / 2 + params.stitch_hole_pullback_m + params.stitch_hole_height_m
+            d1 = pullback / np.tan(angle1 / 2)
+            d2 = pullback / np.tan(angle2 / 2)
+            chamfer = params.corner_chamfer_clearance_m
+            chamfer1 = chamfer / np.cos(angle1 / 2)
+            chamfer2 = chamfer / np.cos(angle2 / 2)
+            d1 = max(d1, params.end_stitch_distance_m, chamfer1)
+            d2 = max(d2, params.end_stitch_distance_m, chamfer2)
+
             # If the edge is too short to even add one pair of stitches, we don't add any
-            if length < 2 * params.ab_stitch_spacing_m:
+            length_left = length - d1 - d2
+            if length_left <= params.ab_stitch_spacing_m:
                 self.stitches.append([])
-                continue    
-            length_left = length - 2 * params.end_stitch_distance_m
-            num_stitches = np.floor(length_left / params.stitch_spacing_m + 0.5)
+                continue
+            num_stitches = int(np.floor(length_left / params.stitch_spacing_m + 0.5))
             # If the edge is too short for two pairs of end stitches we only add one
             if num_stitches < 1:
                 self.stitches.append([0.5])
                 continue
             # OK, we have room for two pairs of end stitches, plus other stitches in the middle,
-            # compute how many and attempt to space them regularly
-            stitch_spacing_actual_m = length_left / num_stitches
-            self.stitches.append(list(np.arange(params.end_stitch_distance_m, length, stitch_spacing_actual_m) / length))
+            # space them regularly
+            self.stitches.append(list(np.linspace(d1 / length, 1 - d2 / length, num_stitches + 1)))
 
     def offsetPoints2D(self, edge_index : int, coords : list[Point]):
         """ Offset the 2D points relative to an edge
@@ -368,6 +386,7 @@ class Facet:
             # Then the stitch clearance points for the edge
             stitches = self.stitches[i]
             if not stitches:
+                panel_contour += [p0, p1]
                 continue
             ps = [None] * len(stitches) * 4
             ps[0::4] = self.offsetPoints2D(i, [(stitch * length - shift - width / 2, inset) for stitch in stitches])
@@ -692,6 +711,7 @@ class Mesh:
         self.facets.sort(key=lambda facet: facet.center())
         for index, facet in enumerate(self.facets):
             facet.index = index
+        print('Assigned %d indexes to the facets' % len(self.facets))
 
     def generate2DContours(self):
         """ Create 2D contours from the 3D facets """
@@ -700,6 +720,9 @@ class Mesh:
             facet.project()
             # Then we generate the contours
             facet.generateContours()
+        num_contours = sum([len(facet.contours2d) for facet in self.facets])
+        num_segments = sum([len(contours) for facet in self.facets for contours in facet.contours2d])
+        print('Generated %d 2D contours with %d segments' % (num_contours, num_segments))
 
         # Generate offsets to layout the 2D polygons on a grid
         rows = np.ceil(np.sqrt(len(self.facets)))
@@ -727,6 +750,8 @@ class Mesh:
         # We go over each facet to ad stitch points
         for facet in self.facets:
             facet.addStitchPoints(self.params)
+        num_stitches = sum([len(stitches) for facet in self.facets for stitches in facet.stitches])
+        print('Added %d stitch points' % num_stitches)
 
     def writeDxf(self, filename : str):
         dxf = ezdxf.new('R2010')
@@ -790,11 +815,11 @@ for mesh in meshes:
     # Orient the facets so that the normal is consistent between faces
     mesh.orientFacets()
 
-    # Add stitch points to all the edges
-    mesh.addStitchPoints()
-
     # Assign indexes to the facets
     mesh.indexFacets()
+
+    # Add stitch points to all the edges
+    mesh.addStitchPoints()
 
     # Generate all the 2D facets
     mesh.generate2DContours()
