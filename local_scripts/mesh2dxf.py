@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import argparse
 from dataclasses import dataclass
+from HersheyFonts import HersheyFonts
 
 @dataclass
 class Parameters:
@@ -30,7 +31,9 @@ class Parameters:
     skeleton_rod_diameter_m : float = 0.00635
     # The clearance between the chamfer at the corner of the panels and
     # the corner vertex
-    corner_chamfer_clearance_m : float = 0.005
+    corner_chamfer_clearance_m : float = 0.00635
+    # The vertical size of the font used for the labels
+    label_font_height_m : float = 0.010
 
 class Vertex:
     """ This class is used to represent a vertex in the mesh graph"""
@@ -92,6 +95,10 @@ class Facet:
         # The 2D contours that we are going to cut,
         # as a list of list of 2D points
         self.contours2d = None
+        # The segments forming the text label, as a list of (start, end) 2D points
+        self.text_segments = None
+        # The center of the 2D bounding box
+        self.center2d = None
         # The index of the facet
         self.index = None
         # The list of stitch locations for each edge of the facet,
@@ -408,6 +415,24 @@ class Facet:
 
         self.contours2d.append(panel_contour)
 
+    def generateLabel(self, mesh_name, font, font_size):
+        """ Generate a label for the facet
+        Args:
+            mesh_name: The name of the mesh
+            font: The font to use
+            font_size: The size of the font
+        """
+        self.text_segments = []
+        words = (mesh_name + ' ' + str(self.index)).split()
+        for i, word in enumerate(words):
+            segments = list(font.lines_for_text(word))
+            min_x = min([min(start[0], end[0]) for start, end in segments])
+            max_x = max([max(start[0], end[0]) for start, end in segments])
+            text_pos = Point((-(min_x + max_x) / 2, ((len(words)) / 2 - i - 1) * 1.1)) * font_size
+            for start, end in font.lines_for_text(word):
+                self.text_segments.append([Point(start) * font_size + text_pos, Point(end) * font_size + text_pos])
+            
+
     def __str__(self):
         return 'Facet : %d vertices' % len(self.vertices)
 
@@ -637,10 +662,12 @@ class Mesh:
             if facet.polygon2d:
                 xs = [point[0] + facet.origin2d[0] for point in facet.polygon2d]
                 ys = [point[1] + facet.origin2d[1] for point in facet.polygon2d] 
-                ax.plot(xs + [xs[0]], ys + [ys[0]], 'r')
-            # The index if it exists
-            if facet.index is not None:
-                ax.text(facet.origin2d[0], facet.origin2d[1], '%d' % facet.index, color='k', horizontalalignment='center', verticalalignment='center')
+                ax.plot(xs + [xs[0]], ys + [ys[0]], 'r--', alpha = 0.6)
+            # The label if it exists
+            if facet.text_segments:
+                xs = list(chain.from_iterable([segment[0][0] + facet.origin2d[0], segment[1][0] + facet.origin2d[0], np.nan] for segment in facet.text_segments))
+                ys = list(chain.from_iterable([segment[0][1] + facet.origin2d[1], segment[1][1] + facet.origin2d[1], np.nan] for segment in facet.text_segments))
+                ax.plot(xs, ys, 'k')
             # The contours if they exist
             if facet.contours2d:
                 for contour in facet.contours2d:
@@ -700,33 +727,47 @@ class Mesh:
                     num_concave_facets += 1
                 else:
                     num_convex_facets += 1
-            if num_concave_facets > num_convex_facets:
+            if num_concave_facets < num_convex_facets:
                 for facet in self.facets:
                     facet.flip()
         print("Oriented %d sub-mesh." % num_connected_meshes)
 
     def indexFacets(self):
-        """ Assign indexes to the facets """
+        """ Assign indexes to the facets. We need an indexing scheme
+        that is as stable as possible when the mesh is modified."""
         # Sort facets based on x, y, and z coordinates
-        self.facets.sort(key=lambda facet: facet.center())
+        # The key is a heuristic. It is trying to deal with facets that
+        # have very close center coordinates, but are not exactly the same.
+        self.facets.sort(key=lambda facet: -facet.center()[1] * 1e6 + facet.center()[2] * 1e3 + facet.center()[0])
         for index, facet in enumerate(self.facets):
             facet.index = index
         print('Assigned %d indexes to the facets' % len(self.facets))
 
     def generate2DContours(self):
-        """ Create 2D contours from the 3D facets """
+        """ Create 2D contours from the 3D facets.
+        Returns:
+            width: The width of the 2D layout
+            height: The height of the 2D layout
+        """
+        # Prepare the font
+        font = HersheyFonts()
+        font.load_default_font()
+        font.normalize_rendering(1.0)
         for facet in self.facets:
             # Start by projecting all the facets
             facet.project()
             # Then we generate the contours
             facet.generateContours()
+            # And finally the label
+            facet.generateLabel(self.name, font, self.params.label_font_height_m)
         num_contours = sum([len(facet.contours2d) for facet in self.facets])
         num_segments = sum([len(contours) for facet in self.facets for contours in facet.contours2d])
         print('Generated %d 2D contours with %d segments' % (num_contours, num_segments))
 
         # Generate offsets to layout the 2D polygons on a grid
         rows = np.ceil(np.sqrt(len(self.facets)))
-        # Extract the widths and heights of the facets
+        # Extract the widths and heights of the facets. Also compute the center
+        # of their bounding boxes
         facet_widths = []
         facet_heights = []
         for facet in self.facets:
@@ -734,16 +775,18 @@ class Mesh:
             ys = [point[1] for point in facet.polygon2d]
             facet_widths.append(max(xs) - min(xs))
             facet_heights.append(max(ys) - min(ys))
+            facet.center2d = Point(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2))
         max_width = max(facet_widths)
         max_height = max(facet_heights)
         row = 0
         col = 0
         for facet in self.facets:
-            facet.origin2d = Point([max_width * col * 1.05, max_height * row * 1.05])
+            facet.origin2d = Point([max_width * (col + 0.5) * 1.05, max_height * (row + 0.5) * 1.05]) - facet.center2d
             col += 1
             if col == rows:
                 col = 0
                 row += 1
+        return max_width * rows * 1.05, max_height * rows * 1.05
 
     def addStitchPoints(self):
         """ Add stitch points to the facets in the mesh. """
@@ -753,15 +796,28 @@ class Mesh:
         num_stitches = sum([len(stitches) for facet in self.facets for stitches in facet.stitches])
         print('Added %d stitch points' % num_stitches)
 
-    def writeDxf(self, filename : str):
-        dxf = ezdxf.new('R2010')
-        msp = dxf.modelspace()
+    def exportToDxf(self, dxf_doc : ezdxf.document.Drawing, dxf_offset : Point):
+        """ Export the mesh to a DXF file.
+        Args:
+            dxf_doc: The DXF document to export to
+            dxf_offset: The offset to apply to the mesh
+        """
+        # Go over each facet and add the 2D contours to the DXF.
+        base_name = self.name.lower().replace(' ', '_')
+        dxf_modelspace = dxf_doc.modelspace()
+        cut_layer = base_name + '_cuts'
+        mark_layer = base_name + '_marks'
+        dxf_doc.layers.add(cut_layer)
+        dxf_doc.layers.add(mark_layer)
         for facet in mesh.facets:
             if not facet.polygon2d:
                 continue
-            msp.add_lwpolyline([(point + facet.origin2d) * 1000 for point in facet.polygon2d], close=True)
-            msp.add_lwpolyline([(point * 0.5 + facet.origin2d) * 1000 for point in facet.polygon2d][::-1], close=True)
-        dxf.saveas(filename)
+            layer_name = base_name + '_' + str(facet.index)
+            origin = facet.origin2d + dxf_offset
+            for contour in facet.contours2d:
+                dxf_modelspace.add_lwpolyline([(point + origin) * 1000 for point in contour], close=True, dxfattribs={'layer': cut_layer})
+            for segment in facet.text_segments:
+                dxf_modelspace.add_line((segment[0] + origin) * 1000, (segment[1] + origin) * 1000, dxfattribs={'layer': mark_layer})
 
     def __str__(self) -> str:
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
@@ -788,7 +844,12 @@ with open(args.json) as file:
     json_data = json.load(file)
 meshes = json_data['meshes']
 
+# Start a DXF file if required
+if args.dxf:
+    dxf_doc = ezdxf.new('R2010', setup=True)
+
 # Process each mesh
+dxf_width = 0
 for mesh in meshes:
     name = mesh['name']
     mesh_data = mesh['edges']
@@ -822,21 +883,25 @@ for mesh in meshes:
     mesh.addStitchPoints()
 
     # Generate all the 2D facets
-    mesh.generate2DContours()
+    width, height = mesh.generate2DContours()
 
     # Export DXF if required
     if args.dxf:
-        mesh.writeDxf(args.dxf)
-
-    # Current state of the mesh
-    print(mesh)
+        mesh.exportToDxf(dxf_doc, Point((dxf_width, 0)))
+        dxf_width += width
 
     # Plot the mesh if required
     if args.plot:
         mesh.plot()
 
-
+    # Current state of the mesh
+    print(mesh)
     print()
+
+# Save the DXF file if required
+if args.dxf:
+    dxf_doc.saveas(args.dxf)
 
 if args.plot:
     plt.show()
+
