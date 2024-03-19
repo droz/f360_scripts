@@ -15,6 +15,8 @@ from HersheyFonts import HersheyFonts
 @dataclass
 class Parameters:
     """ This class contains all the geometrical parameters for this script."""
+    # The gap between the bar and the panel
+    bar_panel_gap_m : float = 0.0
     # The spacing between stitches
     stitch_spacing_m : float = 0.1
     # The distance from the ends towhere the first stitches should be
@@ -88,8 +90,19 @@ class Facet:
         self.vertices = vertices
         # The edges of the facet, as a list of edges
         self.edges = None
-        # The projected polygon, as a list of 2D points
-        self.polygon2d = None
+        # The points of the facet in 3D, as a list of 3D points
+        # This is a convenient link to the geometry of the vertices
+        self.facet3d = [vertex.point for vertex in vertices]
+        # The geometry of the actual panel in 3D, as a list of 3D points
+        # It should be inset relative to the facet
+        self.panel3d = None
+        # The 2D projection of the facet on the plane, as a list of 2D points
+        self.facet2d = None
+        # The 2D projection of the panel on the plane, as a list of 2D points
+        # It should be inset relative to the facet
+        self.panel2d = None
+        # The projected polygon, without the inset, as a list of 2D points
+        self.polygon2d_no_inset = None
         # The origin of the 2D representation of the facet
         self.origin2d = None
         # The 2D contours that we are going to cut,
@@ -209,8 +222,8 @@ class Facet:
         """ Flip the orientation of the facet """
         self.vertices.reverse()
 
-    def adjustPoint(self, index):
-        """ Adjust a 2d point to make the edges lengths match between 2d and 3d.
+    def adjust2DPanelPoint(self, index):
+        """ Adjust a 2d panel point to make the edges lengths match between 2d and 3d.
         Args:
             index: The index of the point to adjust
         """
@@ -220,12 +233,12 @@ class Facet:
         index_after = index + 1
         if index_after >= len(self.vertices):
             index_after -= len(self.vertices)
-        p2d_b = self.polygon2d[index_before]
-        p2d   = self.polygon2d[index]
-        p2d_a = self.polygon2d[index_after]
-        p3d_b = self.vertices[index_before].point
-        p3d   = self.vertices[index].point
-        p3d_a = self.vertices[index_after].point
+        p2d_b = self.panel2d[index_before]
+        p2d   = self.panel2d[index]
+        p2d_a = self.panel2d[index_after]
+        p3d_b = self.panel3d[index_before]
+        p3d   = self.panel3d[index]
+        p3d_a = self.panel3d[index_after]
         v3_b = Vector(p3d - p3d_b)
         v3_a = Vector(p3d_a - p3d)
         l3_b = v3_b.norm()
@@ -240,41 +253,29 @@ class Facet:
             p2d += v2_b * (l3_b - l2_b) / l2_b
             p2d -= v2_a * (l3_a - l2_a) / l2_a
 
-    def project(self):
-        """ Project the facet on a plane """
-        if len(self.vertices) < 3:
-            raise ValueError('Polygon with less than 3 points cannot be projected !!!')
-        # Start by fitting a plane to the polygon and projecting the points on it
-        self.fitPlane()
-        poly3d = [vertex.point for vertex in self.vertices]
-        poly3d_proj = [self.plane.project_point(point) for point in poly3d]
+    def offsetPoints2D(self, edge_index : int, coords : list[Point]):
+        """ Offset the 2D points relative to an edge
+        Args:
+            edge_index: The index of the edge to offset from
+            offset_coords: The offset coordinates (x is the distance along the edge,
+                           y is the offset distance inside the facet)
+        """
+        next_edge_index = (edge_index + 1) % len(self.vertices)
+        edge_dir = Vector(self.facet2d[next_edge_index] - self.facet2d[edge_index]).unit()
+        cross_dir = Vector([-edge_dir[1], edge_dir[0]])
+        return [self.facet2d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
 
-        # Now we need to rotate the polygon to fit a consistent coordinate frame
-        # We use the first edge as x axis.
-        x = Vector(poly3d_proj[1] - poly3d_proj[0]).unit()
-        z = self.plane.normal
-        y = z.cross(x)
-        self.polygon2d = []
-        for point in poly3d_proj:
-            v = Vector(point - self.plane.point)
-            px = x.scalar_projection(v)
-            py = y.scalar_projection(v)
-            self.polygon2d.append(Point([px, py]))
-
-        # By doing the projection, if the facet was not planar,
-        #  we ended up changing the length of the edges. For a quad,
-        #  we can fix that by adjusting the points.
-        if len(self.vertices) == 4:
-            # Find the smallest diagonal, we will keep it constant and adjust the other points
-            d1 = Vector(poly3d[2] - poly3d[0]).norm()
-            d2 = Vector(poly3d[3] - poly3d[1]).norm()
-            if d1 > d2:
-                adjust_indexes = [0, 2]
-            else:
-                adjust_indexes = [1, 3]
-            # Now we can adjust the points
-            for index in adjust_indexes:
-                self.adjustPoint(index)
+    def offsetPoints3D(self, edge_index : int, coords : list[Point]):
+        """ Offset the 3D points relative to an edge
+        Args:
+            edge_index: The index of the edge to offset from
+            offset_coords: The offset coordinates (x is the distance along the edge,
+                           y is the offset distance inside the facet)
+        """
+        next_edge_index = (edge_index + 1) % len(self.vertices)
+        edge_dir = Vector(self.vertices[next_edge_index].point - self.vertices[edge_index].point).unit()
+        cross_dir = self.plane.normal.cross(edge_dir)
+        return [self.vertices[edge_index].point + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
 
     def fitPlane(self):
         """ Fit a plane to the facet """
@@ -294,6 +295,71 @@ class Facet:
         if sum(local_normal_fit) < 0:
             self.plane.normal = - self.plane.normal
 
+    def generate3DPanel(self, params : Parameters):
+        """ Generate the 3D panel, with the correct inset
+        Args:
+            params: The parameters to use
+        """
+        num_vertices = len(self.vertices)
+        inset = params.skeleton_rod_diameter_m / 2 + params.bar_panel_gap_m
+        # Go over each vertex and move it toward the inside
+        self.panel3d = []
+        for i in range(len(self.vertices)):
+            i_previous = i - 1 if i > 0 else num_vertices - 1
+            i_next = i + 1 if i < num_vertices - 1 else 0
+            p0 = self.facet3d[i_previous]
+            p1 = self.facet3d[i]
+            p2 = self.facet3d[i_next]
+            v0 = Vector(p0 - p1)
+            v1 = Vector(p2 - p1)
+            # We compute how much we need to move each point toward the inside
+            v_bisector = (v0.unit() + v1.unit()).unit()
+            angle = np.abs(v0.angle_between(v1))
+            vertex_shift = inset / np.sin(angle / 2)
+            self.panel3d.append(p1 + v_bisector * vertex_shift)
+
+    def generate2DPanel(self):
+        """ Generate the 3D panel, with the correct inset """
+        if len(self.vertices) < 3:
+            raise ValueError('Polygon with less than 3 points cannot be projected !!!')
+        # Start by fitting a plane to the polygon and projecting the points on it
+        self.fitPlane()
+        facet3d_proj = [self.plane.project_point(point) for point in self.facet3d]
+        panel3d_proj = [self.plane.project_point(point) for point in self.panel3d]
+
+        # Now we need to rotate the polygon to fit a consistent coordinate frame
+        # We use the first edge of the facet as x axis.
+        x = Vector(facet3d_proj[1] - facet3d_proj[0]).unit()
+        z = self.plane.normal
+        y = z.cross(x)
+        self.facet2d = []
+        self.panel2d = []
+        for point in facet3d_proj:
+            v = Vector(point - self.plane.point)
+            px = x.scalar_projection(v)
+            py = y.scalar_projection(v)
+            self.facet2d.append(Point([px, py]))
+        for point in panel3d_proj:
+            v = Vector(point - self.plane.point)
+            px = x.scalar_projection(v)
+            py = y.scalar_projection(v)
+            self.panel2d.append(Point([px, py]))
+
+        # By doing the projection, if the facet was not planar,
+        #  we ended up changing the length of the edges. For a quad,
+        #  we can fix that by adjusting the points.
+        if len(self.vertices) == 4:
+            # Find the smallest diagonal, we will keep it constant and adjust the other points
+            d1 = Vector(self.panel3d[2] - self.panel3d[0]).norm()
+            d2 = Vector(self.panel3d[3] - self.panel3d[1]).norm()
+            if d1 > d2:
+                adjust_indexes = [0, 2]
+            else:
+                adjust_indexes = [1, 3]
+            # Now we can adjust the points
+            for index in adjust_indexes:
+                self.adjust2DPanelPoint(index)
+
     def addStitchPoints(self, params : Parameters):
         """ Add stitch points to the facet.
         Args:
@@ -312,7 +378,7 @@ class Facet:
             ve2 = Vector(v2.point - v3.point).unit()
             angle1 = np.abs(ve0.angle_between(ve1))
             angle2 = np.abs(ve1.angle_between(ve2))
-            pullback = params.skeleton_rod_diameter_m / 2 + params.stitch_hole_pullback_m + params.stitch_hole_height_m
+            pullback = params.skeleton_rod_diameter_m / 2 + params.bar_panel_gap_m + params.stitch_hole_pullback_m + params.stitch_hole_height_m
             d1 = pullback / np.tan(angle1 / 2)
             d2 = pullback / np.tan(angle2 / 2)
             chamfer = params.corner_chamfer_clearance_m
@@ -335,57 +401,39 @@ class Facet:
             # space them regularly
             self.stitches.append(list(np.linspace(d1 / length, 1 - d2 / length, num_stitches + 1)))
 
-    def offsetPoints2D(self, edge_index : int, coords : list[Point]):
-        """ Offset the 2D points relative to an edge
+    def generateContours(self, params : Parameters):
+        """ Generate 2D contours from the 2D polygon
         Args:
-            edge_index: The index of the edge to offset from
-            offset_coords: The offset coordinates (x is the distance along the edge,
-                           y is the offset distance inside the facet)
+            params: The parameters to use
         """
-        next_edge_index = (edge_index + 1) % len(self.vertices)
-        edge_dir = Vector(self.polygon2d[next_edge_index] - self.polygon2d[edge_index]).unit()
-        cross_dir = Vector([-edge_dir[1], edge_dir[0]])
-        return [self.polygon2d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
-
-    def offsetPoints3D(self, edge_index : int, coords : list[Point]):
-        """ Offset the 3D points relative to an edge
-        Args:
-            edge_index: The index of the edge to offset from
-            offset_coords: The offset coordinates (x is the distance along the edge,
-                           y is the offset distance inside the facet)
-        """
-        next_edge_index = (edge_index + 1) % len(self.vertices)
-        edge_dir = Vector(self.vertices[next_edge_index].point - self.vertices[edge_index].point).unit()
-        cross_dir = self.plane.normal.cross(edge_dir)
-        return [self.vertices[edge_index].point + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
-
-    def generateContours(self):
-        """ Generate 2D contours from the 2D polygon """
         num_vertices = len(self.vertices)
+        inset = params.skeleton_rod_diameter_m / 2 + params.bar_panel_gap_m
+        pullback = params.stitch_hole_pullback_m
+        shift = params.ab_stitch_spacing_m / 2
+        width = params.stitch_hole_width_m
+        height = params.stitch_hole_height_m
         # We start by figuring out how much each edge should be cut by at the
         # end to create a chamfer that guarantees the correct clearance to the corner
         cut_distances = []
         for i in range(len(self.vertices)):
             i_previous = i - 1 if i > 0 else num_vertices - 1
             i_next = i + 1 if i < num_vertices - 1 else 0
-            v0 = Vector(self.polygon2d[i] - self.polygon2d[i_previous])
-            v1 = Vector(self.polygon2d[i] - self.polygon2d[i_next])
+            v0 = Vector(self.facet2d[i] - self.facet2d[i_previous])
+            v1 = Vector(self.facet2d[i] - self.facet2d[i_next])
             angle = np.abs(v0.angle_between(v1))
             chamfer_distance = params.corner_chamfer_clearance_m / np.cos(angle / 2)
             # The rod diameter compensation may also end up making the new corner
             # further away than the clearance, check for that here
-            rod_pullback_distance = params.skeleton_rod_diameter_m / 2 / np.tan(angle / 2)
+            rod_pullback_distance = inset / np.tan(angle / 2)
             cut_distances.append(max(chamfer_distance, rod_pullback_distance))
 
-        inset = params.skeleton_rod_diameter_m / 2
-        pullback = params.stitch_hole_pullback_m
-        shift = params.ab_stitch_spacing_m / 2
-        width = params.stitch_hole_width_m
-        height = params.stitch_hole_height_m
+
+        self.stitches = [[]]*num_vertices
+
         panel_contour = []
         self.contours2d = []
         for i in range(num_vertices):
-            length = Vector(self.polygon2d[(i+1) % num_vertices] - self.polygon2d[i]).norm()
+            length = Vector(self.facet2d[(i+1) % num_vertices] - self.facet2d[i]).norm()
             d0 = cut_distances[i]
             d1 = cut_distances[(i+1) % num_vertices]
             # Compute the two end-points
@@ -441,11 +489,14 @@ class Facet:
 
 class Mesh:
     """ This class is used to represent a mesh as a graph of vertices and a list of facets."""
-    def __init__(self, name : str, params : Parameters):
+    def __init__(self, name : str, params : Parameters = None):
         # The name of the mesh
         self.name = name
         # The parameters
-        self.params = params
+        if params is None:
+            self.params = Parameters()
+        else:
+            self.params = params
         # The vertices of the mesh
         self.vertices = []
         # The edges in the mesh
@@ -571,7 +622,7 @@ class Mesh:
         print('Found %d facets' % len(self.facets))
 
     def plot(self):
-        """ Plot the mesh in 3D """
+        """ Plot the mesh """
         fig = plt.figure()
         fig.suptitle(self.name)
         fig.set_figwidth(10)
@@ -590,18 +641,18 @@ class Mesh:
 
         # The facets
         for facet in self.facets:
-            if len(facet.vertices) == 3:
-                ptA = facet.vertices[0].point
-                ptB = facet.vertices[1].point
-                ptC = facet.vertices[2].point
+            if len(facet.panel3d) == 3:
+                ptA = facet.panel3d[0]
+                ptB = facet.panel3d[1]
+                ptC = facet.panel3d[2]
                 xs = np.array([[ptA[0], ptB[0]], [ptC[0], np.nan]])
                 ys = np.array([[ptA[1], ptB[1]], [ptC[1], np.nan]])
                 zs = np.array([[ptA[2], ptB[2]], [ptC[2], np.nan]])
             if len(facet.vertices) == 4:
-                ptA = facet.vertices[0].point
-                ptB = facet.vertices[1].point
-                ptC = facet.vertices[3].point
-                ptD = facet.vertices[2].point
+                ptA = facet.panel3d[0]
+                ptB = facet.panel3d[1]
+                ptC = facet.panel3d[3]
+                ptD = facet.panel3d[2]
                 xs = np.array([[ptA[0], ptB[0]], [ptC[0], ptD[0]]])
                 ys = np.array([[ptA[1], ptB[1]], [ptC[1], ptD[1]]])
                 zs = np.array([[ptA[2], ptB[2]], [ptC[2], ptD[2]]])
@@ -642,10 +693,6 @@ class Mesh:
         ax.scatter([dot[0] for dot in dots],
                    [dot[1] for dot in dots],
                    [dot[2] for dot in dots], c='g', marker='o', s = 5)
-        # The vertices
-        ax.scatter([vertex.point[0] for vertex in self.vertices],
-                   [vertex.point[1] for vertex in self.vertices],
-                   [vertex.point[2] for vertex in self.vertices], 'o')
         ax.set_box_aspect(None, zoom=1.7)
         ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
@@ -658,11 +705,16 @@ class Mesh:
         # 2D view
         ax = fig.add_subplot(1, 2, 2)
         for facet in self.facets:
-            # The 2D polygon if it exists
-            if facet.polygon2d:
-                xs = [point[0] + facet.origin2d[0] for point in facet.polygon2d]
-                ys = [point[1] + facet.origin2d[1] for point in facet.polygon2d] 
-                ax.plot(xs + [xs[0]], ys + [ys[0]], 'r--', alpha = 0.6)
+            # The 2D facet if it exists
+            if facet.facet2d:
+                xs = [point[0] + facet.origin2d[0] for point in facet.facet2d]
+                ys = [point[1] + facet.origin2d[1] for point in facet.facet2d] 
+                ax.plot(xs + [xs[0]], ys + [ys[0]], 'r--', alpha = 0.6, linewidth = 1)
+            # The 2D panel if it exists
+            if facet.facet2d:
+                xs = [point[0] + facet.origin2d[0] for point in facet.panel2d]
+                ys = [point[1] + facet.origin2d[1] for point in facet.panel2d] 
+                ax.plot(xs + [xs[0]], ys + [ys[0]], 'g:', alpha = 0.6, linewidth = 1)
             # The label if it exists
             if facet.text_segments:
                 xs = list(chain.from_iterable([segment[0][0] + facet.origin2d[0], segment[1][0] + facet.origin2d[0], np.nan] for segment in facet.text_segments))
@@ -743,27 +795,17 @@ class Mesh:
             facet.index = index
         print('Assigned %d indexes to the facets' % len(self.facets))
 
-    def generate2DContours(self):
-        """ Create 2D contours from the 3D facets.
-        Returns:
-            width: The width of the 2D layout
-            height: The height of the 2D layout
-        """
-        # Prepare the font
-        font = HersheyFonts()
-        font.load_default_font()
-        font.normalize_rendering(1.0)
+    def generatePanels(self):
+        """ Compute the shape of the panels, compensated for the rod diameter """
         for facet in self.facets:
-            # Start by projecting all the facets
-            facet.project()
-            # Then we generate the contours
-            facet.generateContours()
-            # And finally the label
-            facet.generateLabel(self.name, font, self.params.label_font_height_m)
-        num_contours = sum([len(facet.contours2d) for facet in self.facets])
-        num_segments = sum([len(contours) for facet in self.facets for contours in facet.contours2d])
-        print('Generated %d 2D contours with %d segments' % (num_contours, num_segments))
+            # First the 3D inset
+            facet.generate3DPanel(self.params)
+            # Then the 2D projection
+            facet.generate2DPanel()
+        print('Generated %d panels' % len(self.facets))
 
+    def generate2DLayout(self):
+        """ Generate a 2D layout for all the panels of the mesh."""
         # Generate offsets to layout the 2D polygons on a grid
         rows = np.ceil(np.sqrt(len(self.facets)))
         # Extract the widths and heights of the facets. Also compute the center
@@ -771,8 +813,8 @@ class Mesh:
         facet_widths = []
         facet_heights = []
         for facet in self.facets:
-            xs = [point[0] for point in facet.polygon2d]
-            ys = [point[1] for point in facet.polygon2d]
+            xs = [point[0] for point in facet.facet2d]
+            ys = [point[1] for point in facet.facet2d]
             facet_widths.append(max(xs) - min(xs))
             facet_heights.append(max(ys) - min(ys))
             facet.center2d = Point(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2))
@@ -787,6 +829,28 @@ class Mesh:
                 col = 0
                 row += 1
         return max_width * rows * 1.05, max_height * rows * 1.05
+
+    def generate2DContours(self):
+        """ Create 2D contours from the 3D facets.
+        Args:
+            pullback: The pullback to apply to the 2D contours
+        Returns:
+            width: The width of the 2D layout
+            height: The height of the 2D layout
+        """
+        # Prepare the font
+        font = HersheyFonts()
+        font.load_default_font()
+        font.normalize_rendering(1.0)
+        for facet in self.facets:
+            # Then we generate the contours
+            facet.generateContours(self.params)
+            # And finally the label
+            facet.generateLabel(self.name, font, self.params.label_font_height_m)
+        num_contours = sum([len(facet.contours2d) for facet in self.facets])
+        num_segments = sum([len(contours) for facet in self.facets for contours in facet.contours2d])
+        print('Generated %d 2D contours with %d segments' % (num_contours, num_segments))
+
 
     def addStitchPoints(self):
         """ Add stitch points to the facets in the mesh. """
@@ -810,7 +874,7 @@ class Mesh:
         dxf_doc.layers.add(cut_layer)
         dxf_doc.layers.add(mark_layer)
         for facet in mesh.facets:
-            if not facet.polygon2d:
+            if not facet.contours2d:
                 continue
             layer_name = base_name + '_' + str(facet.index)
             origin = facet.origin2d + dxf_offset
@@ -822,9 +886,8 @@ class Mesh:
     def __str__(self) -> str:
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
         num_quads = len([facet for facet in self.facets if len(facet.vertices) == 4])
-        num_poly2d = len([facet for facet in self.facets if facet.polygon2d])
-        return 'Mesh %s : %d vertices, %d edges, %d facets (%d triangles, %d quads), %d 2D polygons' % (
-            self.name, len(self.vertices), len(self.edges), len(self.facets), num_triangles, num_quads, num_poly2d)
+        return 'Mesh %s : %d vertices, %d edges, %d facets (%d triangles, %d quads)' % (
+            self.name, len(self.vertices), len(self.edges), len(self.facets), num_triangles, num_quads)
 
     def __repr__(self):
         return self.__str__()
@@ -833,11 +896,10 @@ parser = argparse.ArgumentParser(description='Convert a mesh to a DXF file')
 parser.add_argument('json', type=str, help='The input JSON file')
 parser.add_argument('-d', '--dxf', type=str, help='The output DXF file')
 parser.add_argument('-p', '--plot', action='store_true', help='Plot the mesh')
-parser.add_argument('-m', '--mesh_name', type=str, action='append', help='The name of the mesh/meshes to convert')
+parser.add_argument('-m', '--mesh', type=str, action='append', help='The name of the mesh/meshes to convert')
+parser.add_argument('--gap', type=str, action='append', help='Defines an extra gap between the bars and '
+                    'the panels for a given mesh. Format is "mesh_name:gap", gap is in meters')
 args = parser.parse_args()
-
-# Default parameters
-params = Parameters()
 
 # Read the json file
 with open(args.json) as file:
@@ -854,14 +916,21 @@ for mesh in meshes:
     name = mesh['name']
     mesh_data = mesh['edges']
 
-    if args.mesh_name and name not in args.mesh_name:
+    if args.mesh and name not in args.mesh:
         continue
 
     print(name)
     print("-" * len(name))
 
+    # Create a mesh object and assign parameters
+    mesh = Mesh(name) 
+    for gap_str in args.gap or []:
+        mesh_name, gap_str = gap_str.split(':')
+        if mesh_name == mesh.name:
+            mesh.params.bar_panel_gap_m = float(gap_str)
+            break
+
     # Build a graph of this mesh
-    mesh = Mesh(name, params) 
     mesh.buildFromSegments(mesh_data)
 
     # Find the facets in the mesh3
@@ -879,11 +948,14 @@ for mesh in meshes:
     # Assign indexes to the facets
     mesh.indexFacets()
 
+    # Generate the panels (with the correct inset)
+    mesh.generatePanels()
+
+    # Generate the 2D layout
+    width, height = mesh.generate2DLayout()
+
     # Add stitch points to all the edges
     mesh.addStitchPoints()
-
-    # Generate all the 2D facets
-    width, height = mesh.generate2DContours()
 
     # Export DXF if required
     if args.dxf:
