@@ -90,6 +90,8 @@ class Facet:
         self.vertices = vertices
         # The edges of the facet, as a list of edges
         self.edges = None
+        # The plane that the facet lies on
+        self.plane = None
         # The points of the facet in 3D, as a list of 3D points
         # This is a convenient link to the geometry of the vertices
         self.facet3d = [vertex.point for vertex in vertices]
@@ -101,8 +103,6 @@ class Facet:
         # The 2D projection of the panel on the plane, as a list of 2D points
         # It should be inset relative to the facet
         self.panel2d = None
-        # The projected polygon, without the inset, as a list of 2D points
-        self.polygon2d_no_inset = None
         # The origin of the 2D representation of the facet
         self.origin2d = None
         # The 2D contours that we are going to cut,
@@ -114,10 +114,12 @@ class Facet:
         self.center2d = None
         # The index of the facet
         self.index = None
-        # The list of stitch locations for each edge of the facet,
-        #  as a list of lists of fractional distances (0 is the start of the edge, 1 the end)
-        # Each location corresponds to a pair of (stitch hole, stitch relief).
-        # The location is the point in-between these two.
+        # The list of chamfer sizes for each corner of the facet.
+        # This distance is the distance along the edge that should be
+        # cut to form the chamfer.
+        self.chamfers = None
+        # The list of stitch locations for each edge of the panel,
+        #  as a list distances from the start vertex of the edge
         self.stitches = None
 
     def subFacet(self, indexes : list[int]):
@@ -221,6 +223,20 @@ class Facet:
     def flip(self):
         """ Flip the orientation of the facet """
         self.vertices.reverse()
+        if self.plane:
+            self.plane.normal = - self.plane.normal
+        if self.facet2d:
+            self.facet2d.reverse()
+        if self.panel2d:
+            self.panel2d.reverse()
+        if self.facet3d:
+            self.facet3d.reverse()
+        if self.panel3d:
+            self.panel3d.reverse()
+        if self.chamfers:
+            self.chamfers.reverse()
+        if self.stitches:
+            self.stitches = None
 
     def adjust2DPanelPoint(self, index):
         """ Adjust a 2d panel point to make the edges lengths match between 2d and 3d.
@@ -265,17 +281,37 @@ class Facet:
         cross_dir = Vector([-edge_dir[1], edge_dir[0]])
         return [self.facet2d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
 
-    def offsetPoints3D(self, edge_index : int, coords : list[Point]):
-        """ Offset the 3D points relative to an edge
+    def panelPoints3D(self, edge_index : int, coords : list[Point]):
+        """ Compute the 3D positions of points on a panel given coordinates
+            that are relative to an edge
         Args:
             edge_index: The index of the edge to offset from
-            offset_coords: The offset coordinates (x is the distance along the edge,
-                           y is the offset distance inside the facet)
+            coords: The coordinates relative to the edge as a 2D point
+                    x is the distance along the edge,
+                    y is the offset distance inside the facet
         """
         next_edge_index = (edge_index + 1) % len(self.vertices)
-        edge_dir = Vector(self.vertices[next_edge_index].point - self.vertices[edge_index].point).unit()
+        edge_dir = Vector(self.panel3d[next_edge_index] - self.panel3d[edge_index]).unit()
         cross_dir = self.plane.normal.cross(edge_dir)
-        return [self.vertices[edge_index].point + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
+        return [self.panel3d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
+
+    def stitchPoints3D(self, edge : int, params : Parameters):
+        """ For a given edge index, compute the 3D positions of the stitch points
+        Args:
+            edge_index: The index of the edge to offset from
+            params: The parameters to use
+        Returns:
+            a list of pairs of 3D points, each pair being the hole and loop of a stitch
+        """
+        # We can get the hole positions directly from the stitch coordinates
+        holes = self.panelPoints3D(edge, [(d, params.stitch_hole_pullback_m) for d in self.stitches[edge]])
+        # For the loops, we can project the holes on the edge itself
+        p0 = self.facet3d[edge]
+        p1 = self.facet3d[(edge + 1) % len(self.vertices)]
+        edge_dir = Vector(p1 - p0).unit()
+        edge_line = Line(p0, edge_dir)
+        loops = [edge_line.project_point(hole) for hole in holes]
+        return zip(holes, loops)
 
     def fitPlane(self):
         """ Fit a plane to the facet """
@@ -304,6 +340,7 @@ class Facet:
         inset = params.skeleton_rod_diameter_m / 2 + params.bar_panel_gap_m
         # Go over each vertex and move it toward the inside
         self.panel3d = []
+        self.chamfers = []
         for i in range(len(self.vertices)):
             i_previous = i - 1 if i > 0 else num_vertices - 1
             i_next = i + 1 if i < num_vertices - 1 else 0
@@ -317,6 +354,10 @@ class Facet:
             angle = np.abs(v0.angle_between(v1))
             vertex_shift = inset / np.sin(angle / 2)
             self.panel3d.append(p1 + v_bisector * vertex_shift)
+            # This is a good opportunity to compute the chamfer sizes.
+            chamfer_cut = params.corner_chamfer_clearance_m - vertex_shift
+            chamfer = max(0, chamfer_cut / np.cos(angle / 2))
+            self.chamfers.append(chamfer)
 
     def generate2DPanel(self):
         """ Generate the 3D panel, with the correct inset """
@@ -366,24 +407,23 @@ class Facet:
             params: The parameters to use
         """
         self.stitches = []
-        for v0, v1, v2, v3 in zip(self.vertices[-1:] + self.vertices[:-1],
-                                  self.vertices,
-                                  self.vertices[1:] + self.vertices[:1],
-                                  self.vertices[2:] + self.vertices[:2]):
-            length = Vector(v2.point - v1.point).norm()
+        for p0, p1, p2, p3, chamfer1, chamfer2 in zip(self.panel2d[-1:] + self.panel2d[:-1],
+                                                      self.panel2d,
+                                                      self.panel2d[1:] + self.panel2d[:1],
+                                                      self.panel2d[2:] + self.panel2d[:2],
+                                                      self.chamfers,
+                                                      self.chamfers[1:] + self.chamfers[:1]):
+            length = Vector(p2 - p1).norm()
             # We need to figure out where we are going to place the first and last stitches.
             # This will depend on the angle of the edge with the previous and next edges.
-            ve0 = Vector(v0.point - v1.point).unit()
-            ve1 = Vector(v2.point - v1.point).unit()
-            ve2 = Vector(v2.point - v3.point).unit()
+            ve0 = Vector(p0 - p1).unit()
+            ve1 = Vector(p2 - p1).unit()
+            ve2 = Vector(p2 - p3).unit()
             angle1 = np.abs(ve0.angle_between(ve1))
             angle2 = np.abs(ve1.angle_between(ve2))
-            pullback = params.skeleton_rod_diameter_m / 2 + params.bar_panel_gap_m + params.stitch_hole_pullback_m + params.stitch_hole_height_m
-            d1 = pullback / np.tan(angle1 / 2)
-            d2 = pullback / np.tan(angle2 / 2)
-            chamfer = params.corner_chamfer_clearance_m
-            chamfer1 = chamfer / np.cos(angle1 / 2)
-            chamfer2 = chamfer / np.cos(angle2 / 2)
+            pullback = params.stitch_hole_pullback_m + params.stitch_hole_height_m
+            d1 = pullback / np.tan(angle1 / 2) + params.ab_stitch_spacing_m
+            d2 = pullback / np.tan(angle2 / 2) + params.ab_stitch_spacing_m
             d1 = max(d1, params.end_stitch_distance_m, chamfer1)
             d2 = max(d2, params.end_stitch_distance_m, chamfer2)
 
@@ -395,11 +435,11 @@ class Facet:
             num_stitches = int(np.floor(length_left / params.stitch_spacing_m + 0.5))
             # If the edge is too short for two pairs of end stitches we only add one
             if num_stitches < 1:
-                self.stitches.append([0.5])
+                self.stitches.append([(d1 + length - d2) / 2])
                 continue
             # OK, we have room for two pairs of end stitches, plus other stitches in the middle,
             # space them regularly
-            self.stitches.append(list(np.linspace(d1 / length, 1 - d2 / length, num_stitches + 1)))
+            self.stitches.append(list(np.linspace(d1, length - d2, num_stitches + 1)))
 
     def generateContours(self, params : Parameters):
         """ Generate 2D contours from the 2D polygon
@@ -678,21 +718,17 @@ class Mesh:
         zs = list(chain.from_iterable([edge.start.point[2], edge.end.point[2], np.nan] for edge in self.edges))
         ax.plot(xs, ys, zs, 'k')
         # The stitches
-        dots = []
+        stitches = []
         for facet in self.facets:
             if not facet.stitches:
                 continue
-            for i in range(len(facet.vertices)):
-                v1 = facet.vertices[i]
-                v2 = facet.vertices[(i+1) % len(facet.vertices)]
-                length = Vector(v2.point - v1.point).norm()
-                stitches = facet.stitches[i]
-                if not stitches:
-                    continue
-                dots += facet.offsetPoints3D(i, [(r * length + self.params.ab_stitch_spacing_m / 2, self.params.stitch_hole_pullback_m) for r in stitches])
-        ax.scatter([dot[0] for dot in dots],
-                   [dot[1] for dot in dots],
-                   [dot[2] for dot in dots], c='g', marker='o', s = 5)
+            for edge in range(len(facet.vertices)):
+                stitches += facet.stitchPoints3D(edge, self.params)
+        xs = list(chain.from_iterable([stitch[0][0], stitch[1][0], np.nan] for stitch in stitches))
+        ys = list(chain.from_iterable([stitch[0][1], stitch[1][1], np.nan] for stitch in stitches))
+        zs = list(chain.from_iterable([stitch[0][2], stitch[1][2], np.nan] for stitch in stitches))
+        ax.plot(xs, ys, zs, 'g')
+        # Setup the viewport
         ax.set_box_aspect(None, zoom=1.7)
         ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
