@@ -18,11 +18,11 @@ class Parameters:
     # The gap between the bar and the panel
     bar_panel_gap_m : float = 0.0
     # The spacing between stitches
-    stitch_spacing_m : float = 0.1
+    nominal_stitch_spacing_m : float = 0.1
     # The distance from the ends towhere the first stitches should be
     end_stitch_distance_m : float = 0.03
-    # The spacing between stitches for the panels on each side of the edge
-    ab_stitch_spacing_m : float = 0.01
+    # The minimum spacing allowed between two stitches from different panels
+    minimum_stitch_spacing_m : float = 0.01
     # The distance from the edge of the facet to the stitch holes
     stitch_hole_pullback_m : float = 0.006
     # The width of a stitch hole
@@ -58,6 +58,8 @@ class Edge:
         self.start = start
         # The end vertex
         self.end = end
+        # The facets that are using this edge
+        self.facets = []
 
     def isSame(self, edge : 'Edge'):
         """ Check if another edge is actually the same as this one.
@@ -94,7 +96,7 @@ class Facet:
         self.plane = None
         # The points of the facet in 3D, as a list of 3D points
         # This is a convenient link to the geometry of the vertices
-        self.facet3d = [vertex.point for vertex in vertices]
+        self.facet3d = None
         # The geometry of the actual panel in 3D, as a list of 3D points
         # It should be inset relative to the facet
         self.panel3d = None
@@ -190,27 +192,11 @@ class Facet:
         Args:
             edge: The edge to compare against
         Returns:
-            True if the edge is part of the facet, False otherwise
+            The index of the edge in the facet, or None if it is not part of the facet
         """
-        for v1, v2 in zip(self.vertices, self.vertices[1:] + self.vertices[:1]):
+        for i, (v1, v2) in enumerate(zip(self.vertices, self.vertices[1:] + self.vertices[:1])):
             if (v1 == edge.start and v2 == edge.end) or (v1 == edge.end and v2 == edge.start):
-                return True
-        return False, None
-
-    def findEdge(self, vertex1 : Vertex, vertex2 : Vertex):
-        """ Find an edge between two vertices.
-        Args:
-            vertex1: The first vertex
-            vertex2: The second vertex
-        Returns:
-            The edge if it exists, None otherwise
-            The orientation of the edge, True if it goes from vertex1 to vertex2, False otherwise
-        """
-        for edge in self.edges:
-            if edge.start == vertex1 and edge.end == vertex2:
-                return edge, True
-            if edge.start == vertex2 and edge.end == vertex1:
-                return edge, False
+                return i
         return None
 
     def center(self):
@@ -225,18 +211,10 @@ class Facet:
         self.vertices.reverse()
         if self.plane:
             self.plane.normal = - self.plane.normal
-        if self.facet2d:
-            self.facet2d.reverse()
-        if self.panel2d:
-            self.panel2d.reverse()
-        if self.facet3d:
-            self.facet3d.reverse()
-        if self.panel3d:
-            self.panel3d.reverse()
-        if self.chamfers:
-            self.chamfers.reverse()
-        if self.stitches:
-            self.stitches = None
+        # Check that none of the other properties of the face have been computed.
+        # They would all get invalidated by the flip.
+        if self.facet2d or self.facet3d or self.panel2d or self.panel3d or self.chamfers or self.edges or self.stitches:
+            raise ValueError('Cannot flip a facet that has already been processed !!!')
 
     def adjust2DPanelPoint(self, index):
         """ Adjust a 2d panel point to make the edges lengths match between 2d and 3d.
@@ -311,7 +289,7 @@ class Facet:
         edge_dir = Vector(p1 - p0).unit()
         edge_line = Line(p0, edge_dir)
         loops = [edge_line.project_point(hole) for hole in holes]
-        return zip(holes, loops)
+        return list(zip(holes, loops))
 
     def fitPlane(self):
         """ Fit a plane to the facet """
@@ -336,17 +314,12 @@ class Facet:
         Args:
             params: The parameters to use
         """
-        num_vertices = len(self.vertices)
         inset = params.skeleton_rod_diameter_m / 2 + params.bar_panel_gap_m
         # Go over each vertex and move it toward the inside
+        self.facet3d = [vertex.point for vertex in self.vertices]
         self.panel3d = []
         self.chamfers = []
-        for i in range(len(self.vertices)):
-            i_previous = i - 1 if i > 0 else num_vertices - 1
-            i_next = i + 1 if i < num_vertices - 1 else 0
-            p0 = self.facet3d[i_previous]
-            p1 = self.facet3d[i]
-            p2 = self.facet3d[i_next]
+        for p0, p1, p2 in zip(self.facet3d[-1:] + self.facet3d[:-1], self.facet3d, self.facet3d[1:] + self.facet3d[:1]):
             v0 = Vector(p0 - p1)
             v1 = Vector(p2 - p1)
             # We compute how much we need to move each point toward the inside
@@ -422,17 +395,17 @@ class Facet:
             angle1 = np.abs(ve0.angle_between(ve1))
             angle2 = np.abs(ve1.angle_between(ve2))
             pullback = params.stitch_hole_pullback_m + params.stitch_hole_height_m
-            d1 = pullback / np.tan(angle1 / 2) + params.ab_stitch_spacing_m
-            d2 = pullback / np.tan(angle2 / 2) + params.ab_stitch_spacing_m
+            d1 = pullback / np.tan(angle1 / 2) + 2 * params.stitch_hole_width_m
+            d2 = pullback / np.tan(angle2 / 2) + 2 * params.stitch_hole_width_m
             d1 = max(d1, params.end_stitch_distance_m, chamfer1)
             d2 = max(d2, params.end_stitch_distance_m, chamfer2)
 
             # If the edge is too short to even add one pair of stitches, we don't add any
             length_left = length - d1 - d2
-            if length_left <= params.ab_stitch_spacing_m:
+            if length_left <= 2 * params.minimum_stitch_spacing_m:
                 self.stitches.append([])
                 continue
-            num_stitches = int(np.floor(length_left / params.stitch_spacing_m + 0.5))
+            num_stitches = int(np.floor(length_left / params.nominal_stitch_spacing_m + 0.5))
             # If the edge is too short for two pairs of end stitches we only add one
             if num_stitches < 1:
                 self.stitches.append([(d1 + length - d2) / 2])
@@ -455,11 +428,9 @@ class Facet:
         # We start by figuring out how much each edge should be cut by at the
         # end to create a chamfer that guarantees the correct clearance to the corner
         cut_distances = []
-        for i in range(len(self.vertices)):
-            i_previous = i - 1 if i > 0 else num_vertices - 1
-            i_next = i + 1 if i < num_vertices - 1 else 0
-            v0 = Vector(self.facet2d[i] - self.facet2d[i_previous])
-            v1 = Vector(self.facet2d[i] - self.facet2d[i_next])
+        for p0, p1, p2 in zip(self.facet2d[-1:] + self.facet2d[:-1], self.facet2d, self.facet2d[1:] + self.facet2d[:1]):
+            v0 = Vector(p1 - p0)
+            v1 = Vector(p1 - p2)
             angle = np.abs(v0.angle_between(v1))
             chamfer_distance = params.corner_chamfer_clearance_m / np.cos(angle / 2)
             # The rod diameter compensation may also end up making the new corner
@@ -543,6 +514,8 @@ class Mesh:
         self.edges = []
         # The facets of the mesh
         self.facets = []
+        # Some error points that we want to flag on the display
+        self.error_points = []
 
     def maybeAddVertex(self, vertex : Vertex, tolerance : float = 0.001):
         """ Find a vertex in the graph by proximity. If it is not found, add it.
@@ -631,10 +604,12 @@ class Mesh:
                     self.edges.append(edge)
         # Associate edges to each facets
         for facet in self.facets:
-            facet.edges = []
+            facet.edges = [None] * len(facet.vertices)
             for edge in self.edges:
-                if facet.containsEdge(edge):
-                    facet.edges.append(edge)
+                index = facet.containsEdge(edge)
+                if index is not None:
+                    facet.edges[index] = edge
+                    edge.facets.append(facet)
 
         print('Found %d edges' % len(self.edges))
 
@@ -722,12 +697,17 @@ class Mesh:
         for facet in self.facets:
             if not facet.stitches:
                 continue
-            for edge in range(len(facet.vertices)):
-                stitches += facet.stitchPoints3D(edge, self.params)
+            for edge_index in range(len(facet.vertices)):
+                stitches += facet.stitchPoints3D(edge_index, self.params)
         xs = list(chain.from_iterable([stitch[0][0], stitch[1][0], np.nan] for stitch in stitches))
         ys = list(chain.from_iterable([stitch[0][1], stitch[1][1], np.nan] for stitch in stitches))
         zs = list(chain.from_iterable([stitch[0][2], stitch[1][2], np.nan] for stitch in stitches))
         ax.plot(xs, ys, zs, 'g')
+        # The error points
+        xs = [point[0] for point in self.error_points]
+        ys = [point[1] for point in self.error_points]
+        zs = [point[2] for point in self.error_points]
+        ax.scatter(xs, ys, zs, c='r', marker='X')
         # Setup the viewport
         ax.set_box_aspect(None, zoom=1.7)
         ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
@@ -887,14 +867,46 @@ class Mesh:
         num_segments = sum([len(contours) for facet in self.facets for contours in facet.contours2d])
         print('Generated %d 2D contours with %d segments' % (num_contours, num_segments))
 
-
     def addStitchPoints(self):
         """ Add stitch points to the facets in the mesh. """
-        # We go over each facet to ad stitch points
+        # We go over each facet to add stitch points
         for facet in self.facets:
             facet.addStitchPoints(self.params)
+        # We now need to make sure that no pair of stitches overlap.
+        num_adjustments = 0
+        for facet1 in self.facets:
+            for index1, edge in enumerate(facet1.edges):
+                if len(edge.facets) < 2:
+                    continue
+                facet2 = edge.facets[1] if edge.facets[0] is facet1 else edge.facets[0]
+                index2 = [index for index, edge2 in enumerate(facet2.edges) if edge2 is edge]
+                if len(index2) != 1:
+                    raise ValueError('Edge not found in facet')
+                # if (facet1.index != 9 or facet2.index != 16) and (facet1.index != 16 or facet2.index != 9):
+                #     continue
+                index2 = index2[0]
+                stitches1 = facet1.stitchPoints3D(index1, self.params)
+                stitches2 = facet2.stitchPoints3D(index2, self.params)
+                p1 = facet1.facet3d[index1]
+                p2 = facet2.facet3d[index2]
+                edge_center = (p1 + p2) / 2
+                for i1, (_, loop1) in enumerate(stitches1):
+                    for i2, (_, loop2) in enumerate(stitches2):
+                        dist = p1.distance_point(loop2) - p1.distance_point(loop1)
+                        if np.abs(dist) < self.params.minimum_stitch_spacing_m - 1e-6:
+                            num_adjustments += 1
+                            # We are going to move the stitch that is the closest to the center of the edge
+                            d1c = edge_center.distance_point(loop1)
+                            d2c = edge_center.distance_point(loop2)
+                            if d1c < d2c:
+                                # We are moving d1
+                                facet1.stitches[index1][i1] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
+                            else:
+                                # We are moving d2
+                                facet2.stitches[index2][i2] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
+
         num_stitches = sum([len(stitches) for facet in self.facets for stitches in facet.stitches])
-        print('Added %d stitch points' % num_stitches)
+        print('Added %d stitch points, Adjusted %d to avoid overlap' % (num_stitches, num_adjustments))
 
     def exportToDxf(self, dxf_doc : ezdxf.document.Drawing, dxf_offset : Point):
         """ Export the mesh to a DXF file.
@@ -972,9 +984,6 @@ for mesh in meshes:
     # Find the facets in the mesh3
     mesh.findFacets(4)
 
-    # Find the edges in the mesh
-    mesh.findEdges()
-
     # Remove the redundant quads (those that are made of two existing triangles)
     mesh.removeRedundantQuads()
 
@@ -983,6 +992,9 @@ for mesh in meshes:
 
     # Assign indexes to the facets
     mesh.indexFacets()
+
+    # Find the edges in the mesh
+    mesh.findEdges()
 
     # Generate the panels (with the correct inset)
     mesh.generatePanels()
