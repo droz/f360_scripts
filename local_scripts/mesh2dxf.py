@@ -120,9 +120,12 @@ class Facet:
         # This distance is the distance along the edge that should be
         # cut to form the chamfer.
         self.chamfers = None
-        # The list of stitch locations for each edge of the panel,
+        # The list of stitch hole locations for each edge of the panel,
         #  as a list distances from the start vertex of the edge
-        self.stitches = None
+        self.stitch_holes = None
+        # The list of stitch relief locations for each edge of the panel,
+        #  as a list distances from the start vertex of the edge
+        self.stitch_reliefs = None
 
     def subFacet(self, indexes : list[int]):
         """ Create a sub-facet from a list of indexes.
@@ -213,7 +216,7 @@ class Facet:
             self.plane.normal = - self.plane.normal
         # Check that none of the other properties of the face have been computed.
         # They would all get invalidated by the flip.
-        if self.facet2d or self.facet3d or self.panel2d or self.panel3d or self.chamfers or self.edges or self.stitches:
+        if self.facet2d or self.facet3d or self.panel2d or self.panel3d or self.chamfers or self.edges or self.stitch_holes:
             raise ValueError('Cannot flip a facet that has already been processed !!!')
 
     def adjust2DPanelPoint(self, index):
@@ -282,7 +285,7 @@ class Facet:
             a list of pairs of 3D points, each pair being the hole and loop of a stitch
         """
         # We can get the hole positions directly from the stitch coordinates
-        holes = self.panelPoints3D(edge, [(d, params.stitch_hole_pullback_m) for d in self.stitches[edge]])
+        holes = self.panelPoints3D(edge, [(d, params.stitch_hole_pullback_m) for d in self.stitch_holes[edge]])
         # For the loops, we can project the holes on the edge itself
         p0 = self.facet3d[edge]
         p1 = self.facet3d[(edge + 1) % len(self.vertices)]
@@ -290,6 +293,19 @@ class Facet:
         edge_line = Line(p0, edge_dir)
         loops = [edge_line.project_point(hole) for hole in holes]
         return list(zip(holes, loops))
+
+    def stitchReliefs3D(self, edge : int):
+        """ For a given edge index, compute the 3D positions of the stitch reliefs
+        Args:
+            edge_index: The index of the edge to offset from
+            params: The parameters to use
+        Returns:
+            a list of 3D points, each being the relief of a stitch
+        """
+        # We can get the relief positions directly from the stitch coordinates
+        if self.stitch_reliefs[edge] is None:
+            return []
+        return self.panelPoints3D(edge, [(d, 0) for d in self.stitch_reliefs[edge]])
 
     def fitPlane(self):
         """ Fit a plane to the facet """
@@ -379,7 +395,7 @@ class Facet:
         Args:
             params: The parameters to use
         """
-        self.stitches = []
+        self.stitch_holes = []
         for p0, p1, p2, p3, chamfer1, chamfer2 in zip(self.panel2d[-1:] + self.panel2d[:-1],
                                                       self.panel2d,
                                                       self.panel2d[1:] + self.panel2d[:1],
@@ -403,16 +419,17 @@ class Facet:
             # If the edge is too short to even add one pair of stitches, we don't add any
             length_left = length - d1 - d2
             if length_left <= 2 * params.minimum_stitch_spacing_m:
-                self.stitches.append([])
+                self.stitch_holes.append([])
                 continue
             num_stitches = int(np.floor(length_left / params.nominal_stitch_spacing_m + 0.5))
             # If the edge is too short for two pairs of end stitches we only add one
             if num_stitches < 1:
-                self.stitches.append([(d1 + length - d2) / 2])
+                self.stitch_holes.append([(d1 + length - d2) / 2])
                 continue
             # OK, we have room for two pairs of end stitches, plus other stitches in the middle,
             # space them regularly
-            self.stitches.append(list(np.linspace(d1, length - d2, num_stitches + 1)))
+            self.stitch_holes.append(list(np.linspace(d1, length - d2, num_stitches + 1)))
+        self.stitch_reliefs = [None] * len(self.vertices)
 
     def generateContours(self, params : Parameters):
         """ Generate 2D contours from the 2D polygon
@@ -439,7 +456,7 @@ class Facet:
             cut_distances.append(max(chamfer_distance, rod_pullback_distance))
 
 
-        self.stitches = [[]]*num_vertices
+        self.stitch_holes = [[]]*num_vertices
 
         panel_contour = []
         self.contours2d = []
@@ -450,7 +467,7 @@ class Facet:
             # Compute the two end-points
             p0, p1 = self.offsetPoints2D(i, [(0 + d0, inset), (length - d1, inset)])
             # Then the stitch clearance points for the edge
-            stitches = self.stitches[i]
+            stitches = self.stitch_holes[i]
             if not stitches:
                 panel_contour += [p0, p1]
                 continue
@@ -695,7 +712,7 @@ class Mesh:
         # The stitches
         stitches = []
         for facet in self.facets:
-            if not facet.stitches:
+            if not facet.stitch_holes:
                 continue
             for edge_index in range(len(facet.vertices)):
                 stitches += facet.stitchPoints3D(edge_index, self.params)
@@ -703,6 +720,16 @@ class Mesh:
         ys = list(chain.from_iterable([stitch[0][1], stitch[1][1], np.nan] for stitch in stitches))
         zs = list(chain.from_iterable([stitch[0][2], stitch[1][2], np.nan] for stitch in stitches))
         ax.plot(xs, ys, zs, 'g')
+        reliefs = []
+        for facet in self.facets:
+            if not facet.stitch_reliefs:
+                continue
+            for edge_index in range(len(facet.vertices)):
+                reliefs += facet.stitchReliefs3D(edge_index)
+        xs = [point[0] for point in reliefs]
+        ys = [point[1] for point in reliefs]
+        zs = [point[2] for point in reliefs]
+        ax.scatter(xs, ys, zs, c='b', marker='.')
         # The error points
         xs = [point[0] for point in self.error_points]
         ys = [point[1] for point in self.error_points]
@@ -882,8 +909,6 @@ class Mesh:
                 index2 = [index for index, edge2 in enumerate(facet2.edges) if edge2 is edge]
                 if len(index2) != 1:
                     raise ValueError('Edge not found in facet')
-                # if (facet1.index != 9 or facet2.index != 16) and (facet1.index != 16 or facet2.index != 9):
-                #     continue
                 index2 = index2[0]
                 stitches1 = facet1.stitchPoints3D(index1, self.params)
                 stitches2 = facet2.stitchPoints3D(index2, self.params)
@@ -900,12 +925,18 @@ class Mesh:
                             d2c = edge_center.distance_point(loop2)
                             if d1c < d2c:
                                 # We are moving d1
-                                facet1.stitches[index1][i1] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
+                                facet1.stitch_holes[index1][i1] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
                             else:
                                 # We are moving d2
-                                facet2.stitches[index2][i2] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
+                                facet2.stitch_holes[index2][i2] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
+                # At this point we should have no overlaps. We transfer the location of the stitches to the other facet
+                stitches1 = facet1.stitchPoints3D(index1, self.params)
+                panel2_p1 = facet2.panel3d[index2]
+                panel2_p2 = facet2.panel3d[(index2 + 1) % len(facet2.vertices)]
+                panel2_edge_dir = Vector(panel2_p2 - panel2_p1).unit()
+                facet2.stitch_reliefs[index2] = [(loop1 - panel2_p1).dot(panel2_edge_dir) for _, loop1 in stitches1]
 
-        num_stitches = sum([len(stitches) for facet in self.facets for stitches in facet.stitches])
+        num_stitches = sum([len(stitches) for facet in self.facets for stitches in facet.stitch_holes])
         print('Added %d stitch points, Adjusted %d to avoid overlap' % (num_stitches, num_adjustments))
 
     def exportToDxf(self, dxf_doc : ezdxf.document.Drawing, dxf_offset : Point):
