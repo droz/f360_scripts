@@ -110,6 +110,9 @@ class Facet:
         # The 2D contours that we are going to cut,
         # as a list of list of 2D points
         self.contours2d = None
+        # The 3D contours that we are going to cut,
+        # as a list of list of 3D points
+        self.contours3d = None
         # The segments forming the text label, as a list of (start, end) 2D points
         self.text_segments = None
         # The center of the 2D bounding box
@@ -121,10 +124,10 @@ class Facet:
         # cut to form the chamfer.
         self.chamfers = None
         # The list of stitch hole locations for each edge of the panel,
-        #  as a list distances from the start vertex of the edge
+        #  as a list of distances from the start vertex of the edge
         self.stitch_holes = None
         # The list of stitch relief locations for each edge of the panel,
-        #  as a list distances from the start vertex of the edge
+        #  as a list of distances from the start vertex of the edge
         self.stitch_reliefs = None
 
     def subFacet(self, indexes : list[int]):
@@ -250,17 +253,19 @@ class Facet:
             p2d += v2_b * (l3_b - l2_b) / l2_b
             p2d -= v2_a * (l3_a - l2_a) / l2_a
 
-    def offsetPoints2D(self, edge_index : int, coords : list[Point]):
-        """ Offset the 2D points relative to an edge
+    def panelPoints2D(self, edge_index : int, coords : list[Point]):
+        """ Compute the 2D positions of points on a panel given coordinates
+            that are relative to an edge
         Args:
             edge_index: The index of the edge to offset from
-            offset_coords: The offset coordinates (x is the distance along the edge,
-                           y is the offset distance inside the facet)
+            coords: The coordinates relative to the edge as a 2D point
+                    x is the distance along the edge,
+                    y is the offset distance inside the facet
         """
         next_edge_index = (edge_index + 1) % len(self.vertices)
-        edge_dir = Vector(self.facet2d[next_edge_index] - self.facet2d[edge_index]).unit()
-        cross_dir = Vector([-edge_dir[1], edge_dir[0]])
-        return [self.facet2d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
+        edge_dir = Vector(self.panel2d[next_edge_index] - self.panel2d[edge_index]).unit()
+        cross_dir = Vector((-edge_dir[1], edge_dir[0]))
+        return [self.panel2d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
 
     def panelPoints3D(self, edge_index : int, coords : list[Point]):
         """ Compute the 3D positions of points on a panel given coordinates
@@ -344,8 +349,11 @@ class Facet:
             vertex_shift = inset / np.sin(angle / 2)
             self.panel3d.append(p1 + v_bisector * vertex_shift)
             # This is a good opportunity to compute the chamfer sizes.
-            chamfer_cut = params.corner_chamfer_clearance_m - vertex_shift
-            chamfer = max(0, chamfer_cut / np.cos(angle / 2))
+            # We make all the chamfers the same size from the edge. Alternatively,
+            # we could compute them to be a set distance form the corner vertex:
+            #     chamfer_cut = params.corner_chamfer_clearance_m - vertex_shift
+            #     chamfer = max(0, chamfer_cut / np.cos(angle / 2))
+            chamfer = params.corner_chamfer_clearance_m
             self.chamfers.append(chamfer)
 
     def generate2DPanel(self):
@@ -437,59 +445,48 @@ class Facet:
             params: The parameters to use
         """
         num_vertices = len(self.vertices)
-        inset = params.skeleton_rod_diameter_m / 2 + params.bar_panel_gap_m
-        pullback = params.stitch_hole_pullback_m
-        shift = params.ab_stitch_spacing_m / 2
-        width = params.stitch_hole_width_m
-        height = params.stitch_hole_height_m
-        # We start by figuring out how much each edge should be cut by at the
-        # end to create a chamfer that guarantees the correct clearance to the corner
-        cut_distances = []
-        for p0, p1, p2 in zip(self.facet2d[-1:] + self.facet2d[:-1], self.facet2d, self.facet2d[1:] + self.facet2d[:1]):
-            v0 = Vector(p1 - p0)
-            v1 = Vector(p1 - p2)
-            angle = np.abs(v0.angle_between(v1))
-            chamfer_distance = params.corner_chamfer_clearance_m / np.cos(angle / 2)
-            # The rod diameter compensation may also end up making the new corner
-            # further away than the clearance, check for that here
-            rod_pullback_distance = inset / np.tan(angle / 2)
-            cut_distances.append(max(chamfer_distance, rod_pullback_distance))
+        stitch_pullback = params.stitch_hole_pullback_m
+        stitch_width = params.stitch_hole_width_m
+        stitch_height = params.stitch_hole_height_m
 
-
-        self.stitch_holes = [[]]*num_vertices
-
-        panel_contour = []
-        self.contours2d = []
-        for i in range(num_vertices):
-            length = Vector(self.facet2d[(i+1) % num_vertices] - self.facet2d[i]).norm()
-            d0 = cut_distances[i]
-            d1 = cut_distances[(i+1) % num_vertices]
-            # Compute the two end-points
-            p0, p1 = self.offsetPoints2D(i, [(0 + d0, inset), (length - d1, inset)])
-            # Then the stitch clearance points for the edge
-            stitches = self.stitch_holes[i]
-            if not stitches:
-                panel_contour += [p0, p1]
-                continue
-            ps = [None] * len(stitches) * 4
-            ps[0::4] = self.offsetPoints2D(i, [(stitch * length - shift - width / 2, inset) for stitch in stitches])
-            ps[1::4] = self.offsetPoints2D(i, [(stitch * length - shift - width / 2, inset + height) for stitch in stitches])
-            ps[2::4] = self.offsetPoints2D(i, [(stitch * length - shift + width / 2, inset + height) for stitch in stitches])
-            ps[3::4] = self.offsetPoints2D(i, [(stitch * length - shift + width / 2, inset) for stitch in stitches])
-            panel_contour += [p0] + ps + [p1]
-            # Then the holes for the stitches
-            for stitch in stitches:
-                hole_coords = [(stitch * length + shift - width / 2, inset + pullback),
-                               (stitch * length + shift - width / 2, inset + pullback + height),
-                               (stitch * length + shift + width / 2, inset + pullback + height),
-                               (stitch * length + shift + width / 2, inset + pullback)]
-                ph = self.offsetPoints2D(i, hole_coords)
-                self.contours2d.append(ph)
+        self.contours2d = [[]]
+        self.contours3d = [[]]
+        # Go over each edge
+        for i_p0 in range(num_vertices):
+            i_p1 = (i_p0 + 1) % num_vertices
+            chamfer0 = self.chamfers[i_p0]
+            chamfer1 = self.chamfers[i_p1]
+            length = Vector(self.panel2d[i_p1] - self.panel2d[i_p0]).norm()
+            # Compute the edge relative coordinates of the two end-points
+            p0 = (chamfer0, 0)
+            p1 = (length - chamfer1, 0)
+            # Compute the edge relative coordinates of the reliefs
+            if self.stitch_reliefs[i_p0] is not None:
+                pr = list(chain.from_iterable(
+                        ((relief - stitch_width / 2, 0),
+                         (relief - stitch_width / 2, stitch_height),
+                         (relief + stitch_width / 2, stitch_height),
+                         (relief + stitch_width / 2, 0))
+                      for relief in sorted(self.stitch_reliefs[i_p0])))
+            else:
+                pr = []
+            self.contours2d[0] += self.panelPoints2D(i_p0, [p0] + pr + [p1])
+            self.contours3d[0] += self.panelPoints3D(i_p0, [p0] + pr + [p1])
+            # Also add the holes for the stitches
+            for stitch in sorted(self.stitch_holes[i_p0]):
+                edge_coords = [(stitch - stitch_width / 2, stitch_pullback),
+                               (stitch - stitch_width / 2, stitch_pullback + stitch_height),
+                               (stitch + stitch_width / 2, stitch_pullback + stitch_height),
+                               (stitch + stitch_width / 2, stitch_pullback)]
+                self.contours2d.append(self.panelPoints2D(i_p0, edge_coords))
+                self.contours3d.append(self.panelPoints3D(i_p0, edge_coords))
 
         # We may have ended up with zero length segments, remove them here
-        panel_contour = [panel_contour[i] for i in range(len(panel_contour)) if panel_contour[i].distance_point(panel_contour[(i + 1) % len(panel_contour)]) > 1e-6]
-
-        self.contours2d.append(panel_contour)
+        n = len(self.contours2d[0])
+        p2d = self.contours2d[0]
+        p3d = self.contours3d[0]
+        self.contours2d[0] = [p2d[i] for i in range(n) if p2d[i].distance_point(p2d[(i + 1) % n]) > 1e-6]
+        self.contours3d[0] = [p3d[i] for i in range(n) if p3d[i].distance_point(p3d[(i + 1) % n]) > 1e-6]
 
     def generateLabel(self, mesh_name, font, font_size):
         """ Generate a label for the facet
@@ -730,6 +727,15 @@ class Mesh:
         ys = [point[1] for point in reliefs]
         zs = [point[2] for point in reliefs]
         ax.scatter(xs, ys, zs, c='b', marker='.')
+        # The contours if they exist
+        for facet in self.facets:
+            if facet.contours3d:
+                for contour in facet.contours3d:
+                    if contour:
+                        xs = [point[0] for point in contour]
+                        ys = [point[1] for point in contour]
+                        zs = [point[2] for point in contour]
+                        ax.plot(xs + [xs[0]], ys + [ys[0]], zs + [zs[0]], 'k')
         # The error points
         xs = [point[0] for point in self.error_points]
         ys = [point[1] for point in self.error_points]
@@ -873,10 +879,8 @@ class Mesh:
                 row += 1
         return max_width * rows * 1.05, max_height * rows * 1.05
 
-    def generate2DContours(self):
-        """ Create 2D contours from the 3D facets.
-        Args:
-            pullback: The pullback to apply to the 2D contours
+    def generateContours(self):
+        """ Create contours for the panel.
         Returns:
             width: The width of the 2D layout
             height: The height of the 2D layout
@@ -892,7 +896,7 @@ class Mesh:
             facet.generateLabel(self.name, font, self.params.label_font_height_m)
         num_contours = sum([len(facet.contours2d) for facet in self.facets])
         num_segments = sum([len(contours) for facet in self.facets for contours in facet.contours2d])
-        print('Generated %d 2D contours with %d segments' % (num_contours, num_segments))
+        print('Generated %d contours with %d segments' % (num_contours, num_segments))
 
     def addStitchPoints(self):
         """ Add stitch points to the facets in the mesh. """
@@ -956,7 +960,6 @@ class Mesh:
         for facet in mesh.facets:
             if not facet.contours2d:
                 continue
-            layer_name = base_name + '_' + str(facet.index)
             origin = facet.origin2d + dxf_offset
             for contour in facet.contours2d:
                 dxf_modelspace.add_lwpolyline([(point + origin) * 1000 for point in contour], close=True, dxfattribs={'layer': cut_layer})
@@ -1036,6 +1039,9 @@ for mesh in meshes:
 
     # Add stitch points to all the edges
     mesh.addStitchPoints()
+
+    # Generate the contours that will be cut by the laser
+    mesh.generateContours()
 
     # Export DXF if required
     if args.dxf:
