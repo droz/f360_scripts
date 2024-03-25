@@ -936,8 +936,9 @@ class Mesh:
                 panel2_edge_dir = Vector(panel2_p2 - panel2_p1).unit()
                 facet2.stitch_reliefs[index2] = [(loop1 - panel2_p1).dot(panel2_edge_dir) for _, loop1 in stitches1]
 
-        num_stitches = sum([len(stitches) for facet in self.facets for stitches in facet.stitch_holes])
-        print('Added %d stitch points, Adjusted %d to avoid overlap' % (num_stitches, num_adjustments))
+        num_holes = sum([len(holes) for facet in self.facets for holes in facet.stitch_holes if holes is not None])
+        num_reliefs = sum([len(reliefs) for facet in self.facets for reliefs in facet.stitch_reliefs if reliefs is not None])
+        print('Added %d stitch holes and %d stitch reliefs, Adjusted %d to avoid overlap' % (num_holes, num_reliefs, num_adjustments))
 
     def exportToDxf(self, dxf_doc : ezdxf.document.Drawing, dxf_offset : Point):
         """ Export the mesh to a DXF file.
