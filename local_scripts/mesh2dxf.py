@@ -18,17 +18,19 @@ class Parameters:
     # The gap between the bar and the panel
     bar_panel_gap_m : float = 0.0
     # The spacing between stitches
-    nominal_stitch_spacing_m : float = 0.1
+    stitch_nominal_spacing_m : float = 0.1
     # The distance from the ends towhere the first stitches should be
-    end_stitch_distance_m : float = 0.03
+    stitch_end_distance_m : float = 0.03
     # The minimum spacing allowed between two stitches from different panels
-    minimum_stitch_spacing_m : float = 0.01
+    stitch_min_spacing_m : float = 0.01
     # The distance from the edge of the facet to the stitch holes
     stitch_hole_pullback_m : float = 0.006
     # The width of a stitch hole
     stitch_hole_width_m : float = 0.005
     # The height of a stitch hole
     stitch_hole_height_m : float = 0.003
+    # Force only two stitches per side
+    stitch_two_per_side : bool = False
     # The diameter of the rods used for the structure
     skeleton_rod_diameter_m : float = 0.00635
     # The clearance between the chamfer at the corner of the panels and
@@ -421,22 +423,25 @@ class Facet:
             pullback = params.stitch_hole_pullback_m + params.stitch_hole_height_m
             d1 = pullback / np.tan(angle1 / 2) + 2 * params.stitch_hole_width_m
             d2 = pullback / np.tan(angle2 / 2) + 2 * params.stitch_hole_width_m
-            d1 = max(d1, params.end_stitch_distance_m, chamfer1)
-            d2 = max(d2, params.end_stitch_distance_m, chamfer2)
+            d1 = max(d1, params.stitch_end_distance_m, chamfer1)
+            d2 = max(d2, params.stitch_end_distance_m, chamfer2)
 
             # If the edge is too short to even add one pair of stitches, we don't add any
             length_left = length - d1 - d2
-            if length_left <= 2 * params.minimum_stitch_spacing_m:
+            if length_left <= 2 * params.stitch_min_spacing_m:
                 self.stitch_holes.append([])
                 continue
-            num_stitches = int(np.floor(length_left / params.nominal_stitch_spacing_m + 0.5))
+            num_stitches = int(np.floor(length_left / params.stitch_nominal_spacing_m + 0.5))
             # If the edge is too short for two pairs of end stitches we only add one
             if num_stitches < 1:
                 self.stitch_holes.append([(d1 + length - d2) / 2])
                 continue
             # OK, we have room for two pairs of end stitches, plus other stitches in the middle,
             # space them regularly
-            self.stitch_holes.append(list(np.linspace(d1, length - d2, num_stitches + 1)))
+            if params.stitch_two_per_side:
+                self.stitch_holes.append([d1, length - d2])
+            else:
+                self.stitch_holes.append(list(np.linspace(d1, length - d2, num_stitches + 1)))
         self.stitch_reliefs = [None] * len(self.vertices)
 
     def generateContours(self, params : Parameters):
@@ -728,14 +733,17 @@ class Mesh:
         zs = [point[2] for point in reliefs]
         ax.scatter(xs, ys, zs, c='b', marker='.')
         # The contours if they exist
+        xs = []
+        ys = []
+        zs = []
         for facet in self.facets:
             if facet.contours3d:
                 for contour in facet.contours3d:
                     if contour:
-                        xs = [point[0] for point in contour]
-                        ys = [point[1] for point in contour]
-                        zs = [point[2] for point in contour]
-                        ax.plot(xs + [xs[0]], ys + [ys[0]], zs + [zs[0]], 'k')
+                        xs += [point[0] for point in contour] + [contour[0][0], np.nan]
+                        ys += [point[1] for point in contour] + [contour[0][1], np.nan]
+                        zs += [point[2] for point in contour] + [contour[0][2], np.nan]
+        ax.plot(xs + [xs[0]], ys + [ys[0]], zs + [zs[0]], 'k')
         # The error points
         xs = [point[0] for point in self.error_points]
         ys = [point[1] for point in self.error_points]
@@ -771,11 +779,13 @@ class Mesh:
                 ax.plot(xs, ys, 'k')
             # The contours if they exist
             if facet.contours2d:
+                xs = []
+                ys = []
                 for contour in facet.contours2d:
                     if contour:
-                        xs = [point[0] + facet.origin2d[0] for point in contour]
-                        ys = [point[1] + facet.origin2d[1] for point in contour]
-                        ax.plot(xs + [xs[0]], ys + [ys[0]], 'b')
+                        xs += [point[0] + facet.origin2d[0] for point in contour] + [contour[0][0] + facet.origin2d[0], np.nan]
+                        ys += [point[1] + facet.origin2d[1] for point in contour] + [contour[0][1] + facet.origin2d[1], np.nan]
+                ax.plot(xs + [xs[0]], ys + [ys[0]], 'k')
         ax.axis('equal')
 
         plt.draw()
@@ -922,23 +932,25 @@ class Mesh:
                 for i1, (_, loop1) in enumerate(stitches1):
                     for i2, (_, loop2) in enumerate(stitches2):
                         dist = p1.distance_point(loop2) - p1.distance_point(loop1)
-                        if np.abs(dist) < self.params.minimum_stitch_spacing_m - 1e-6:
+                        if np.abs(dist) < self.params.stitch_min_spacing_m - 1e-6:
                             num_adjustments += 1
                             # We are going to move the stitch that is the closest to the center of the edge
                             d1c = edge_center.distance_point(loop1)
                             d2c = edge_center.distance_point(loop2)
                             if d1c < d2c:
                                 # We are moving d1
-                                facet1.stitch_holes[index1][i1] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
+                                facet1.stitch_holes[index1][i1] += dist - np.sign(dist) * self.params.stitch_min_spacing_m
                             else:
                                 # We are moving d2
-                                facet2.stitch_holes[index2][i2] += dist - np.sign(dist) * self.params.minimum_stitch_spacing_m
+                                facet2.stitch_holes[index2][i2] += dist - np.sign(dist) * self.params.stitch_min_spacing_m
                 # At this point we should have no overlaps. We transfer the location of the stitches to the other facet
-                stitches1 = facet1.stitchPoints3D(index1, self.params)
-                panel2_p1 = facet2.panel3d[index2]
-                panel2_p2 = facet2.panel3d[(index2 + 1) % len(facet2.vertices)]
-                panel2_edge_dir = Vector(panel2_p2 - panel2_p1).unit()
-                facet2.stitch_reliefs[index2] = [(loop1 - panel2_p1).dot(panel2_edge_dir) for _, loop1 in stitches1]
+                # If the gap to the rod is bigger than the stitch hole height, no need for reliefs
+                if self.params.bar_panel_gap_m < self.params.stitch_hole_height_m:
+                    stitches1 = facet1.stitchPoints3D(index1, self.params)
+                    panel2_p1 = facet2.panel3d[index2]
+                    panel2_p2 = facet2.panel3d[(index2 + 1) % len(facet2.vertices)]
+                    panel2_edge_dir = Vector(panel2_p2 - panel2_p1).unit()
+                    facet2.stitch_reliefs[index2] = [(loop1 - panel2_p1).dot(panel2_edge_dir) for _, loop1 in stitches1]
 
         num_holes = sum([len(holes) for facet in self.facets for holes in facet.stitch_holes if holes is not None])
         num_reliefs = sum([len(reliefs) for facet in self.facets for reliefs in facet.stitch_reliefs if reliefs is not None])
@@ -979,9 +991,8 @@ parser = argparse.ArgumentParser(description='Convert a mesh to a DXF file')
 parser.add_argument('json', type=str, help='The input JSON file')
 parser.add_argument('-d', '--dxf', type=str, help='The output DXF file')
 parser.add_argument('-p', '--plot', action='store_true', help='Plot the mesh')
-parser.add_argument('-m', '--mesh', type=str, action='append', help='The name of the mesh/meshes to convert')
-parser.add_argument('--gap', type=str, action='append', help='Defines an extra gap between the bars and '
-                    'the panels for a given mesh. Format is "mesh_name:gap", gap is in meters')
+parser.add_argument('-m', '--mesh', type=str, action='append', help='Select specific meshes to convert, by name')
+parser.add_argument('-g', '--gapped', type=str, action='append', help='Select specific meshes that will be given an "open design" (larger gap to the bars)')
 args = parser.parse_args()
 
 # Read the json file
@@ -1006,12 +1017,10 @@ for mesh in meshes:
     print("-" * len(name))
 
     # Create a mesh object and assign parameters
-    mesh = Mesh(name) 
-    for gap_str in args.gap or []:
-        mesh_name, gap_str = gap_str.split(':')
-        if mesh_name == mesh.name:
-            mesh.params.bar_panel_gap_m = float(gap_str)
-            break
+    mesh = Mesh(name)
+    if args.gapped and name in args.gapped:
+        mesh.params.bar_panel_gap_m = 0.05
+        mesh.params.stitch_two_per_side = True
 
     # Build a graph of this mesh
     mesh.buildFromSegments(mesh_data)
