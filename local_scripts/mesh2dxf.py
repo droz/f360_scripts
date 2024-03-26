@@ -64,7 +64,7 @@ class Edge:
         # The facets that are using this edge
         self.facets = []
 
-    def isSame(self, edge : 'Edge'):
+    def isSame(self, edge : 'Edge') -> bool:
         """ Check if another edge is actually the same as this one.
         Args:
             edge: The edge to compare against
@@ -73,7 +73,7 @@ class Edge:
         """
         return (self.start == edge.start and self.end == edge.end) or (self.start == edge.end and self.end == edge.start)
 
-    def isInList(self, edges : list['Edge']):
+    def isInList(self, edges : list['Edge']) -> bool:
         """ Check if a facet is part of a list of edges, regardless of orientation.
         Args:
             edges: The list of edges to check against
@@ -82,14 +82,14 @@ class Edge:
         """
         return any([self.isSame(list_edge) for list_edge in edges])
 
-    def length(self):
+    def length(self) -> float:
         """ Return the length of the edge """
         return Vector(self.start.point - self.end.point).norm()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return 'Edge : %s -> %s' % (self.start, self.end)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.__str__()
 
 class Facet:
@@ -143,7 +143,7 @@ class Facet:
         #  as a list of distances from the start vertex of the edge
         self.stitch_reliefs = None
 
-    def subFacet(self, indexes : list[int]):
+    def subFacet(self, indexes : list[int]) -> 'Facet':
         """ Create a sub-facet from a list of indexes.
         Args:
             indexes: The indexes of the vertices to use
@@ -152,7 +152,7 @@ class Facet:
         """
         return Facet([self.vertices[index] for index in indexes])
 
-    def isSame(self, facet : list[Vertex]):
+    def isSame(self, facet : list[Vertex]) -> bool:
         """ Check if another facet is actually the same as this one,
             regardless of the starting point or the orientation.
         Args:
@@ -172,7 +172,7 @@ class Facet:
         poly2_rot2 = poly2[idx::-1] + poly2[:idx:-1]
         return poly1 == poly2_rot1 or poly1 == poly2_rot2
 
-    def isInList(self, facets : list['Facet']):
+    def isInList(self, facets : list['Facet']) -> bool:
         """ Check if a facet is part of a list of facets, regardless of start or orientation.
         Args:
             facets: The list of facets to check against
@@ -181,7 +181,7 @@ class Facet:
         """
         return any([self.isSame(list_facet) for list_facet in facets])
 
-    def shareVertex(self, facet : 'Facet'):
+    def shareVertex(self, facet : 'Facet') -> bool:
         """ Check if two facets share a vertex.
         Args:
             facet: The facet to compare against
@@ -190,7 +190,7 @@ class Facet:
         """
         return set(self.vertices) & set(facet.vertices)
 
-    def shareSide(self, facet : 'Facet'):
+    def shareSide(self, facet : 'Facet') -> tuple[bool, bool]:
         """ Check if two facets share a side.
         Args:
             facet: The facet to compare against
@@ -206,7 +206,7 @@ class Facet:
                     return True, True
         return False, None
 
-    def containsEdge(self, edge : Edge):
+    def containsEdge(self, edge : Edge) -> int:
         """ Check if an edge is part of the facet.
         Args:
             edge: The edge to compare against
@@ -225,7 +225,7 @@ class Facet:
         z = self.plane.point[2]
         return x, y, z
 
-    def contourLength(self):
+    def contourLength(self) -> float:
         """ Return the total length of the contours.
         Returns:
             The total length of the contours
@@ -372,7 +372,7 @@ class Facet:
         cross_dir = self.plane.normal.cross(edge_dir)
         return [self.panel3d[edge_index] + edge_dir * coord[0] + cross_dir * coord[1] for coord in coords]
 
-    def stitchPoints3D(self, edge : int, params : Parameters):
+    def stitchPoints3D(self, edge : int, params : Parameters) -> list[tuple[Point, Point]]:
         """ For a given edge index, compute the 3D positions of the stitch points
         Args:
             edge_index: The index of the edge to offset from
@@ -390,7 +390,7 @@ class Facet:
         loops = [edge_line.project_point(hole) for hole in holes]
         return list(zip(holes, loops))
 
-    def stitchReliefs3D(self, edge : int):
+    def stitchReliefs3D(self, edge : int) -> list[Point]:
         """ For a given edge index, compute the 3D positions of the stitch reliefs
         Args:
             edge_index: The index of the edge to offset from
@@ -627,7 +627,7 @@ class Mesh:
         # Some error points that we want to flag on the display
         self.error_points = []
 
-    def maybeAddVertex(self, vertex : Vertex, tolerance : float = 0.001):
+    def maybeAddVertex(self, vertex : Vertex, tolerance : float = 0.001) -> Vertex:
         """ Find a vertex in the graph by proximity. If it is not found, add it.
         This is a linear search, so it is not efficient.
         Args:
@@ -989,7 +989,7 @@ class Mesh:
                 row += 1
         return max_width * rows * 1.05, max_height * rows * 1.05
 
-    def generateContours(self):
+    def generateContours(self) -> tuple[float, float]:
         """ Create contours for the panel.
         Returns:
             width: The width of the 2D layout
@@ -1055,21 +1055,39 @@ class Mesh:
             for segment in facet.text_segments:
                 dxf_modelspace.add_line((segment[0] + origin) * 1000, (segment[1] + origin) * 1000, dxfattribs={'layer': mark_layer})
 
-    def __str__(self) -> str:
-        num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
-        num_quads = len([facet for facet in self.facets if len(facet.vertices) == 4])
+    def stats(self) -> tuple[int, int, int, int, float, float, float, float]:
+        """ Compute some statistics about the mesh.
+        Returns:
+            num_vertices: The number of vertices
+            num_edges: The number of edges
+            num_facets: The number of facets
+            num_stitches: The number of stitches
+            rods_length: The total length of the rods
+            panels_surface: The total surface area of the panels
+            cuts_length: The total length of the cuts
+        """
+        num_vertices = len(self.vertices)
+        num_edges = len(self.edges)
+        num_facets = len(self.facets)
+        num_stitches = sum([facet.numStitches() for facet in self.facets])
         rods_length = sum([edge.length() for edge in self.edges])
         panels_surface = sum([facet.panelSurfaceArea() for facet in self.facets])
         cuts_length = sum([facet.contourLength() for facet in self.facets])
-        num_stitches = sum([facet.numStitches() for facet in self.facets])
+        return num_vertices, num_edges, num_facets, num_stitches, rods_length, panels_surface, cuts_length
+
+
+    def __str__(self) -> str:
+        num_vertices, num_edges, num_facets, num_stitches, rods_length, panels_surface, cuts_length = self.stats()
+        num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
+        num_quads = len([facet for facet in self.facets if len(facet.vertices) == 4])
         return (f'Mesh {self.name} :\n'
-                f'  {len(self.vertices)} vertices\n'
-                f'  {len(self.edges)} edges\n'
-                f'  {len(self.facets)} facets ({num_triangles} triangles, {num_quads} quads)\n'
+                f'  {num_vertices} vertices\n'
+                f'  {num_edges} edges\n'
+                f'  {num_facets} facets ({num_triangles} triangles, {num_quads} quads)\n'
+                f'  {num_stitches} stitches\n'
                 f'  Rods length: {rods_length:.3f}m ({rods_length / 0.0254:.1f}in)\n'
                 f'  Panels surface area: {panels_surface:.3f}m² ({panels_surface * 10.7639:.3f}ft²)\n'
-                f'  Cuts length: {cuts_length:.3f}m ({cuts_length / 0.0254:.1f}in)\n'
-                f'  {num_stitches} stitches\n')
+                f'  Cuts length: {cuts_length:.3f}m ({cuts_length / 0.0254:.1f}in)\n')
 
     def __repr__(self):
         return self.__str__()
@@ -1158,6 +1176,34 @@ for mesh in meshes:
 if args.dxf:
     dxf_doc.saveas(args.dxf)
 
+# Print a table with the statistics
+total_vertices = 0
+total_edges = 0
+total_facets = 0
+total_stitches = 0
+total_rods_length_ft = 0
+total_panels_surface_ft2 = 0
+total_cuts_length_in = 0
+print('+------------------+----------+-------+--------+----------+-------------+----------------+-------------+')
+print('| Mesh             | Vertices | Edges | Facets | Stitches | Rods length | Panels surface | Cuts length |')
+print('|------------------|----------|-------|--------|----------|-------------|----------------|-------------|')
+for mesh in mesh_objects:
+    num_vertices, num_edges, num_facets, num_stitches, rods_length_m, panels_surface_m2, cuts_length_m = mesh.stats()
+    rods_length_ft = rods_length_m / 0.0254 / 12
+    panels_surface_ft2 = panels_surface_m2 * 10.7639
+    cuts_length_in = cuts_length_m / 0.0254
+    total_vertices += num_vertices
+    total_edges += num_edges
+    total_facets += num_facets
+    total_stitches += num_stitches
+    total_rods_length_ft += rods_length_ft
+    total_panels_surface_ft2 += panels_surface_ft2
+    total_cuts_length_in += cuts_length_in
+    print(f'| {mesh.name:17}| {num_vertices:8} | {num_edges:5} | {num_facets:6} | {num_stitches:8} | {rods_length_ft:9.3f}ft | {panels_surface_ft2:11.3f}ft² | {cuts_length_in:9.1f}in |')
+print('|------------------|----------|-------|--------|----------|-------------|----------------|-------------|')
+print(f'| Total            | {total_vertices:8} | {total_edges:5} | {total_facets:6} | {total_stitches:8} | {total_rods_length_ft:9.3f}ft | {total_panels_surface_ft2:11.3f}ft² | {total_cuts_length_in:9.1f}in |')
+print('+------------------+----------+-------+--------+----------+-------------+----------------+-------------+')
+
+
 if args.plot:
     plt.show()
-
