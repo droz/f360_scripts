@@ -125,6 +125,12 @@ class Facet:
         # This distance is the distance along the edge that should be
         # cut to form the chamfer.
         self.chamfers = None
+        # The list of the minimum distance at which a stitch
+        # hole can be placed from each corner
+        self.min_stitch_hole_distance = None
+        # The list of the minimum distance at which a stitch
+        # relief can be placed from each corner
+        self.min_stitch_relief_distance = None
         # The list of stitch hole locations for each edge of the panel,
         #  as a list of distances from the start vertex of the edge
         self.stitch_holes = None
@@ -214,6 +220,13 @@ class Facet:
         z = self.plane.point[2]
         return x, y, z
 
+    def contourLength(self):
+        """ Return the total length of the contours.
+        Returns:
+            The total length of the contours
+        """
+        return sum([p.distance_point(self.contours2d[0][(i + 1) % len(self.contours2d[0])]) for i, p in enumerate(self.contours2d[0])])
+
     def flip(self):
         """ Flip the orientation of the facet """
         self.vertices.reverse()
@@ -254,6 +267,65 @@ class Facet:
             # Nudge the point roughly in the correct direction
             p2d += v2_b * (l3_b - l2_b) / l2_b
             p2d -= v2_a * (l3_a - l2_a) / l2_a
+
+    def adjustStitchPositions(facet1 : "Facet", facet2 : "Facet", edge_index1 : int, edge_index2 : int, params : Parameters):
+        """ Adjust the stitch positions of a pair of facets to prevent overlap
+            and to prevent the relief from extending past the end of the edge.
+        Args:
+            facet1: The first facet
+            facet2: The second facet
+            edge_index1: The index of the edge of facet1 on which to adjust the stitches
+            edge_index2: The index of the edge of facet2 on which to adjust the stitches
+            params: The parameters to use
+        """
+        # First we generate the position of the relief points and if needed we adjust them
+        # to prevent them from extending outside the edge.
+        # That part is only necessary if there is no gap between the bar and the panel
+        def computeReliefs(facet_src, edge_index_src, facet_dst, edge_index_dst):
+            stitches = facet_src.stitchPoints3D(edge_index_src, params)
+            panel_p1 = facet_dst.panel3d[edge_index_dst]
+            panel_p2 = facet_dst.panel3d[(edge_index_dst + 1) % len(facet_dst.vertices)]
+            panel_edge_dir = Vector(panel_p2 - panel_p1).unit()
+            panel_edge_length = Vector(panel_p2 - panel_p1).norm()
+            return [(loop - panel_p1).dot(panel_edge_dir) for _, loop in stitches], panel_edge_length
+
+        def adjustReliefs(facet_src, edge_index_src, facet_dst, edge_index_dst):
+            reliefs, edge_length = computeReliefs(facet_src, edge_index_src, facet_dst, edge_index_dst)
+            for i, relief in enumerate(reliefs):
+                offset1 = facet_dst.min_stitch_relief_distance[edge_index_dst] - relief
+                if offset1 > 0:
+                    facet_src.stitch_holes[edge_index_src][i] -= offset1
+                offset2 = edge_length - facet_dst.min_stitch_relief_distance[(edge_index_dst + 1) % len(facet_dst.vertices)] - relief
+                if offset2 < 0:
+                    facet_src.stitch_holes[edge_index_src][i] -= offset2
+
+        if params.bar_panel_gap_m < params.stitch_hole_height_m:
+            # Adjust the reliefs as needed
+            adjustReliefs(facet2, edge_index2, facet1, edge_index1)
+            adjustReliefs(facet1, edge_index1, facet2, edge_index2)
+            # Then compute the new reliefs
+            facet1.stitch_reliefs[edge_index1], _ = computeReliefs(facet2, edge_index2, facet1, edge_index1)
+            facet2.stitch_reliefs[edge_index2], _ = computeReliefs(facet1, edge_index1, facet2, edge_index2)
+
+        # Finally we check each pair of stitches to see if they are too close to each other and adjust as needed
+        stitches1 = facet1.stitchPoints3D(edge_index1, params)
+        stitches2 = facet2.stitchPoints3D(edge_index2, params)
+        p1 = facet1.facet3d[edge_index1]
+        p2 = facet2.facet3d[edge_index2]
+        edge_center = (p1 + p2) / 2
+        for i1, (_, loop1) in enumerate(stitches1):
+            for i2, (_, loop2) in enumerate(stitches2):
+                dist = p1.distance_point(loop2) - p1.distance_point(loop1)
+                if np.abs(dist) < params.stitch_min_spacing_m - 1e-6:
+                    # We are going to move the stitch that is the closest to the center of the edge
+                    d1c = edge_center.distance_point(loop1)
+                    d2c = edge_center.distance_point(loop2)
+                    if d1c < d2c:
+                        # We are moving d1
+                        facet1.stitch_holes[edge_index1][i1] += dist - np.sign(dist) * params.stitch_min_spacing_m
+                    else:
+                        # We are moving d2
+                        facet2.stitch_holes[edge_index2][i2] += dist - np.sign(dist) * params.stitch_min_spacing_m
 
     def panelPoints2D(self, edge_index : int, coords : list[Point]):
         """ Compute the 2D positions of points on a panel given coordinates
@@ -342,6 +414,8 @@ class Facet:
         self.facet3d = [vertex.point for vertex in self.vertices]
         self.panel3d = []
         self.chamfers = []
+        self.min_stitch_hole_distance = []
+        self.min_stitch_relief_distance = []
         for p0, p1, p2 in zip(self.facet3d[-1:] + self.facet3d[:-1], self.facet3d, self.facet3d[1:] + self.facet3d[:1]):
             v0 = Vector(p0 - p1)
             v1 = Vector(p2 - p1)
@@ -357,6 +431,14 @@ class Facet:
             #     chamfer = max(0, chamfer_cut / np.cos(angle / 2))
             chamfer = params.corner_chamfer_clearance_m
             self.chamfers.append(chamfer)
+            # We also compute the minimum distance from the edge of the panel at which
+            # a stitch hole or stitch relief can be placed
+            hole_pullback = params.stitch_hole_pullback_m + params.stitch_hole_height_m
+            hole_min_distance = hole_pullback / np.tan(angle / 2) + 2 * params.stitch_hole_width_m
+            self.min_stitch_hole_distance.append(hole_min_distance)
+            relief_pullback = params.stitch_hole_height_m * 2
+            relief_min_distance = relief_pullback / np.tan(angle / 2) + params.stitch_hole_width_m
+            self.min_stitch_relief_distance.append(relief_min_distance)
 
     def generate2DPanel(self):
         """ Generate the 3D panel, with the correct inset """
@@ -406,25 +488,17 @@ class Facet:
             params: The parameters to use
         """
         self.stitch_holes = []
-        for p0, p1, p2, p3, chamfer1, chamfer2 in zip(self.panel2d[-1:] + self.panel2d[:-1],
-                                                      self.panel2d,
-                                                      self.panel2d[1:] + self.panel2d[:1],
-                                                      self.panel2d[2:] + self.panel2d[:2],
-                                                      self.chamfers,
-                                                      self.chamfers[1:] + self.chamfers[:1]):
+        for p1, p2, chamfer1, chamfer2, min_dist1, min_dist2 in zip(
+                self.panel2d,
+                self.panel2d[1:] + self.panel2d[:1],
+                self.chamfers,
+                self.chamfers[1:] + self.chamfers[:1],
+                self.min_stitch_hole_distance,
+                self.min_stitch_hole_distance[1:] + self.min_stitch_hole_distance[:1]):
             length = Vector(p2 - p1).norm()
-            # We need to figure out where we are going to place the first and last stitches.
-            # This will depend on the angle of the edge with the previous and next edges.
-            ve0 = Vector(p0 - p1).unit()
-            ve1 = Vector(p2 - p1).unit()
-            ve2 = Vector(p2 - p3).unit()
-            angle1 = np.abs(ve0.angle_between(ve1))
-            angle2 = np.abs(ve1.angle_between(ve2))
-            pullback = params.stitch_hole_pullback_m + params.stitch_hole_height_m
-            d1 = pullback / np.tan(angle1 / 2) + 2 * params.stitch_hole_width_m
-            d2 = pullback / np.tan(angle2 / 2) + 2 * params.stitch_hole_width_m
-            d1 = max(d1, params.stitch_end_distance_m, chamfer1)
-            d2 = max(d2, params.stitch_end_distance_m, chamfer2)
+            # Figure out the distance at which we should place the first and last stitches
+            d1 = max(min_dist1, params.stitch_end_distance_m, chamfer1)
+            d2 = max(min_dist2, params.stitch_end_distance_m, chamfer2)
 
             # If the edge is too short to even add one pair of stitches, we don't add any
             length_left = length - d1 - d2
@@ -906,17 +980,20 @@ class Mesh:
             facet.generateLabel(self.name, font, self.params.label_font_height_m)
         num_contours = sum([len(facet.contours2d) for facet in self.facets])
         num_segments = sum([len(contours) for facet in self.facets for contours in facet.contours2d])
-        print('Generated %d contours with %d segments' % (num_contours, num_segments))
+        total_length = sum([facet.contourLength() for facet in self.facets])
+        print('Generated %d contours with %d segments, total cut length: %.3fm' % (num_contours, num_segments, total_length))
 
     def addStitchPoints(self):
         """ Add stitch points to the facets in the mesh. """
         # We go over each facet to add stitch points
         for facet in self.facets:
             facet.addStitchPoints(self.params)
-        # We now need to make sure that no pair of stitches overlap.
+        # We now need to make sure that stitch holes and stitch reliefs do not overlap and that
+        # stitch reliefs do not extend past the end of the edge.
         num_adjustments = 0
         for facet1 in self.facets:
             for index1, edge in enumerate(facet1.edges):
+                # Find the other facet that shares this edge
                 if len(edge.facets) < 2:
                     continue
                 facet2 = edge.facets[1] if edge.facets[0] is facet1 else edge.facets[0]
@@ -924,33 +1001,8 @@ class Mesh:
                 if len(index2) != 1:
                     raise ValueError('Edge not found in facet')
                 index2 = index2[0]
-                stitches1 = facet1.stitchPoints3D(index1, self.params)
-                stitches2 = facet2.stitchPoints3D(index2, self.params)
-                p1 = facet1.facet3d[index1]
-                p2 = facet2.facet3d[index2]
-                edge_center = (p1 + p2) / 2
-                for i1, (_, loop1) in enumerate(stitches1):
-                    for i2, (_, loop2) in enumerate(stitches2):
-                        dist = p1.distance_point(loop2) - p1.distance_point(loop1)
-                        if np.abs(dist) < self.params.stitch_min_spacing_m - 1e-6:
-                            num_adjustments += 1
-                            # We are going to move the stitch that is the closest to the center of the edge
-                            d1c = edge_center.distance_point(loop1)
-                            d2c = edge_center.distance_point(loop2)
-                            if d1c < d2c:
-                                # We are moving d1
-                                facet1.stitch_holes[index1][i1] += dist - np.sign(dist) * self.params.stitch_min_spacing_m
-                            else:
-                                # We are moving d2
-                                facet2.stitch_holes[index2][i2] += dist - np.sign(dist) * self.params.stitch_min_spacing_m
-                # At this point we should have no overlaps. We transfer the location of the stitches to the other facet
-                # If the gap to the rod is bigger than the stitch hole height, no need for reliefs
-                if self.params.bar_panel_gap_m < self.params.stitch_hole_height_m:
-                    stitches1 = facet1.stitchPoints3D(index1, self.params)
-                    panel2_p1 = facet2.panel3d[index2]
-                    panel2_p2 = facet2.panel3d[(index2 + 1) % len(facet2.vertices)]
-                    panel2_edge_dir = Vector(panel2_p2 - panel2_p1).unit()
-                    facet2.stitch_reliefs[index2] = [(loop1 - panel2_p1).dot(panel2_edge_dir) for _, loop1 in stitches1]
+                # Now we can adjust the stitch points
+                Facet.adjustStitchPositions(facet1, facet2, index1, index2, self.params)
 
         num_holes = sum([len(holes) for facet in self.facets for holes in facet.stitch_holes if holes is not None])
         num_reliefs = sum([len(reliefs) for facet in self.facets for reliefs in facet.stitch_reliefs if reliefs is not None])
