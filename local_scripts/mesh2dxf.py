@@ -5,6 +5,7 @@
 import json
 from itertools import chain
 from skspatial.objects import Plane, Vector, Point, Line
+from skspatial.measurement import area_signed
 import ezdxf
 from matplotlib import pyplot as plt
 import numpy as np
@@ -80,6 +81,10 @@ class Edge:
             True if this edge is in the list, False otherwise
         """
         return any([self.isSame(list_edge) for list_edge in edges])
+
+    def length(self):
+        """ Return the length of the edge """
+        return Vector(self.start.point - self.end.point).norm()
 
     def __str__(self):
         return 'Edge : %s -> %s' % (self.start, self.end)
@@ -236,6 +241,18 @@ class Facet:
         # They would all get invalidated by the flip.
         if self.facet2d or self.facet3d or self.panel2d or self.panel3d or self.chamfers or self.edges or self.stitch_holes:
             raise ValueError('Cannot flip a facet that has already been processed !!!')
+
+    def panelSurfaceArea(self):
+        """ Compute the surface area of the panel """
+        if not self.panel2d:
+            return np.nan
+        return np.abs(area_signed(self.panel2d))
+
+    def numStitches(self):
+        """ Compute the number of stitches on the panel """
+        if not self.stitch_holes:
+            return np.nan
+        return sum([len(holes) for holes in self.stitch_holes])
 
     def adjust2DPanelPoint(self, index):
         """ Adjust a 2d panel point to make the edges lengths match between 2d and 3d.
@@ -736,7 +753,17 @@ class Mesh:
         fig.set_figwidth(10)
 
         # 3D view
-        ax = fig.add_subplot(1, 2, 1, projection='3d')
+        ax3d = fig.add_subplot(1, 2, 1, projection='3d')
+        self.plot3D(ax3d)
+        # 2D view
+        ax2d = fig.add_subplot(1, 2, 2)
+        self.plot2D(ax2d)
+
+    def plot3D(self, ax: plt.Axes):
+        """ Plot the mesh in 3D
+        Args:
+            ax: The 3D axis to plot on
+        """
 
         # Get the bounding box of the mesh
         min_x = min([vertex.point[0] for vertex in self.vertices])
@@ -833,8 +860,7 @@ class Mesh:
         ax.axis('off')
         ax.azim = 45
 
-        # 2D view
-        ax = fig.add_subplot(1, 2, 2)
+    def plot2D(self, ax: plt.Axes):
         for facet in self.facets:
             # The 2D facet if it exists
             if facet.facet2d:
@@ -990,7 +1016,6 @@ class Mesh:
             facet.addStitchPoints(self.params)
         # We now need to make sure that stitch holes and stitch reliefs do not overlap and that
         # stitch reliefs do not extend past the end of the edge.
-        num_adjustments = 0
         for facet1 in self.facets:
             for index1, edge in enumerate(facet1.edges):
                 # Find the other facet that shares this edge
@@ -1006,7 +1031,7 @@ class Mesh:
 
         num_holes = sum([len(holes) for facet in self.facets for holes in facet.stitch_holes if holes is not None])
         num_reliefs = sum([len(reliefs) for facet in self.facets for reliefs in facet.stitch_reliefs if reliefs is not None])
-        print('Added %d stitch holes and %d stitch reliefs, Adjusted %d to avoid overlap' % (num_holes, num_reliefs, num_adjustments))
+        print('Added %d stitch holes and %d stitch reliefs' % (num_holes, num_reliefs))
 
     def exportToDxf(self, dxf_doc : ezdxf.document.Drawing, dxf_offset : Point):
         """ Export the mesh to a DXF file.
@@ -1033,8 +1058,18 @@ class Mesh:
     def __str__(self) -> str:
         num_triangles = len([facet for facet in self.facets if len(facet.vertices) == 3])
         num_quads = len([facet for facet in self.facets if len(facet.vertices) == 4])
-        return 'Mesh %s : %d vertices, %d edges, %d facets (%d triangles, %d quads)' % (
-            self.name, len(self.vertices), len(self.edges), len(self.facets), num_triangles, num_quads)
+        rods_length = sum([edge.length() for edge in self.edges])
+        panels_surface = sum([facet.panelSurfaceArea() for facet in self.facets])
+        cuts_length = sum([facet.contourLength() for facet in self.facets])
+        num_stitches = sum([facet.numStitches() for facet in self.facets])
+        return (f'Mesh {self.name} :\n'
+                f'  {len(self.vertices)} vertices\n'
+                f'  {len(self.edges)} edges\n'
+                f'  {len(self.facets)} facets ({num_triangles} triangles, {num_quads} quads)\n'
+                f'  Rods length: {rods_length:.3f}m ({rods_length / 0.0254:.1f}in)\n'
+                f'  Panels surface area: {panels_surface:.3f}m² ({panels_surface * 10.7639:.3f}ft²)\n'
+                f'  Cuts length: {cuts_length:.3f}m ({cuts_length / 0.0254:.1f}in)\n'
+                f'  {num_stitches} stitches\n')
 
     def __repr__(self):
         return self.__str__()
@@ -1058,6 +1093,7 @@ if args.dxf:
 
 # Process each mesh
 dxf_width = 0
+mesh_objects = []
 for mesh in meshes:
     name = mesh['name']
     mesh_data = mesh['edges']
@@ -1070,6 +1106,7 @@ for mesh in meshes:
 
     # Create a mesh object and assign parameters
     mesh = Mesh(name)
+    mesh_objects.append(mesh)
     if args.gapped and name in args.gapped:
         mesh.params.bar_panel_gap_m = 0.05
         mesh.params.stitch_two_per_side = True
