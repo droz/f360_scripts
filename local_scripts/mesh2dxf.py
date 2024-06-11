@@ -1044,8 +1044,8 @@ class Mesh:
         dxf_modelspace = dxf_doc.modelspace()
         cut_layer = base_name + '_cuts'
         mark_layer = base_name + '_marks'
-        dxf_doc.layers.add(cut_layer)
-        dxf_doc.layers.add(mark_layer)
+        dxf_doc.layers.add(cut_layer, color = 1)
+        dxf_doc.layers.add(mark_layer, color = 2)
         for facet in mesh.facets:
             if not facet.contours2d:
                 continue
@@ -1098,6 +1098,7 @@ parser.add_argument('-d', '--dxf', type=str, help='The output DXF file')
 parser.add_argument('-p', '--plot', action='store_true', help='Plot the mesh')
 parser.add_argument('-m', '--mesh', type=str, action='append', help='Select specific meshes to convert, by name')
 parser.add_argument('-g', '--gapped', type=str, action='append', help='Select specific meshes that will be given an "open design" (larger gap to the bars)')
+parser.add_argument('-e', '--exclude_facets', type=int, nargs='+', help='Exclude specific facets from the mesh, by index')
 args = parser.parse_args()
 
 # Read the json file
@@ -1126,7 +1127,7 @@ for mesh in meshes:
     mesh = Mesh(name)
     mesh_objects.append(mesh)
     if args.gapped and name in args.gapped:
-        mesh.params.bar_panel_gap_m = 0.05
+        mesh.params.bar_panel_gap_m = 0.04
         mesh.params.stitch_two_per_side = True
 
     # Build a graph of this mesh
@@ -1143,6 +1144,9 @@ for mesh in meshes:
 
     # Assign indexes to the facets
     mesh.indexFacets()
+
+    # Exclude facets if required
+    mesh.facets = [facet for facet in mesh.facets if args.exclude_facets is None or facet.index not in args.exclude_facets]
 
     # Find the edges in the mesh
     mesh.findEdges()
