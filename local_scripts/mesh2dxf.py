@@ -21,7 +21,7 @@ class Parameters:
     # The spacing between stitches
     stitch_nominal_spacing_m : float = 0.1
     # The distance from the ends towhere the first stitches should be
-    stitch_end_distance_m : float = 0.03
+    stitch_end_distance_m : float = 0.01
     # The minimum spacing allowed between two stitches from different panels
     stitch_min_spacing_m : float = 0.01
     # The distance from the edge of the facet to the stitch holes
@@ -517,13 +517,13 @@ class Facet:
             d1 = max(min_dist1, params.stitch_end_distance_m, chamfer1)
             d2 = max(min_dist2, params.stitch_end_distance_m, chamfer2)
 
-            # If the edge is too short to even add one pair of stitches, we don't add any
+            # If the edge is too short to even add a stitch, we don't add any
             length_left = length - d1 - d2
-            if length_left <= 2 * params.stitch_min_spacing_m:
+            if length_left <= 0 :
                 self.stitch_holes.append([])
                 continue
             num_stitches = int(np.floor(length_left / params.stitch_nominal_spacing_m + 0.5))
-            # If the edge is too short for two pairs of end stitches we only add one
+            # If the edge is too short for two end stitches we only add one
             if num_stitches < 1:
                 self.stitch_holes.append([(d1 + length - d2) / 2])
                 continue
