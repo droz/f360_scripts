@@ -21,7 +21,7 @@ class Parameters:
     # The spacing between stitches
     stitch_nominal_spacing_m : float = 0.1
     # The distance from the ends towhere the first stitches should be
-    stitch_end_distance_m : float = 0.01
+    stitch_end_distance_m : float = 0.03
     # The minimum spacing allowed between two stitches from different panels
     stitch_min_spacing_m : float = 0.01
     # The distance from the edge of the facet to the stitch holes
