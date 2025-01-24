@@ -601,6 +601,8 @@ string MakeListDigikey (void)
   string List;
   int numHeaders;
   string a [];
+  string dk_pns [];
+  string mf_pns [];
   int dk_pn_index;
   int mf_pn_index;
   int parts_index;
@@ -657,6 +659,14 @@ string MakeListDigikey (void)
   qty_index = StrFindIndex(Lines[0], "Qty", '\t');
   device_index = StrFindIndex(Lines[0], "Device", '\t');
   value_index = StrFindIndex(Lines[0], "Value", '\t');
+  if (dk_pn_index == -1) {
+    dlgMessageBox ("None of the parts has a Digikey part number. Please make sure at least one part has a DK_PN attribute.");
+    return "";
+  } 
+  if (mf_pn_index == -1) {
+    dlgMessageBox ("None of the parts has a manufacturer part number. Please make sure at least one part has a MF_PN attribute.");
+    return "";
+  }
 
   // Output the header line.
   List += "\"Digi-Key Part Number\", ";
@@ -664,6 +674,7 @@ string MakeListDigikey (void)
   List += "\"Reference Designator\", ";
   List += "\"Quantity1\", ";
   List += "\n";
+
 
   // Now we can output values for each part.
   for (int l = 1; Lines[l]; l ++)
@@ -677,7 +688,8 @@ string MakeListDigikey (void)
     string value = a[value_index];
     string prefix = "";
     string type = "";
-    // If there is no digikey part of manufacturer part number, try to see if we can build one
+    
+    // For resistors, inductors and capacitors, try to build a part number from the database
     if (strsub(device, 0, 9) == "R-US_CHIP") {
       prefix = "R-US_CHIP";
     }
@@ -803,7 +815,21 @@ string MakeListDigikey (void)
     if (dk_pn == "" && mf_pn == "") {
       bad_parts += ", " + a[parts_index];
     } else {
-      List += "\"" + dk_pn + "\", \"" + mf_pn + "\", \"" + parts + "\", \"" + quantity + "\"\n";
+      // We may need to order multiple parts for a single part in the schematic. Do the split here
+      int n_dk = strsplit (dk_pns, dk_pn, ',');
+      int n_mf = strsplit (mf_pns, mf_pn, ',');
+      if (n_dk != n_mf) {
+        dlgMessageBox ("The number of Digikey part numbers and manufacturer part numbers do not match for part " + a[parts_index]);
+      }
+      if (n_dk > 1) {
+        for (int i = 0; i < n_dk; i ++) {
+          dk_pn = StrReplace(dk_pns[i], " ", "");;
+          mf_pn = StrReplace(mf_pns[i], " ", "");;
+          List += "\"" + dk_pn + "\", \"" + mf_pn + "\", \"" + parts + "\", \"" + quantity + "\"\n";
+        }
+      } else {
+        List += "\"" + dk_pn + "\", \"" + mf_pn + "\", \"" + parts + "\", \"" + quantity + "\"\n";
+      }
     }
   }
 
