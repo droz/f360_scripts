@@ -598,7 +598,12 @@ string MakeListCSV (void)
 
 string MakeListDigikey (void)
 {
-  string List;
+  string comps_dk_pn [];
+  string comps_mf_pn [];
+  string comps_refdes [];
+  int comps_qty [];
+  int num_comps = 0;
+  string list;
   int numHeaders;
   string a [];
   string dk_pns [];
@@ -668,14 +673,6 @@ string MakeListDigikey (void)
     return "";
   }
 
-  // Output the header line.
-  List += "\"Digi-Key Part Number\", ";
-  List += "\"Manufacturer Part Number\", ";
-  List += "\"Reference Designator\", ";
-  List += "\"Quantity1\", ";
-  List += "\n";
-
-
   // Now we can output values for each part.
   for (int l = 1; Lines[l]; l ++)
   {
@@ -684,11 +681,11 @@ string MakeListDigikey (void)
     string mf_pn = a[mf_pn_index];
     string parts = a[parts_index];
     string device = a[device_index];
-    string quantity = a[qty_index];
+    int quantity = strtod(a[qty_index]);
     string value = a[value_index];
     string prefix = "";
     string type = "";
-    
+
     // For resistors, inductors and capacitors, try to build a part number from the database
     if (strsub(device, 0, 9) == "R-US_CHIP") {
       prefix = "R-US_CHIP";
@@ -821,14 +818,16 @@ string MakeListDigikey (void)
       if (n_dk != n_mf) {
         dlgMessageBox ("The number of Digikey part numbers and manufacturer part numbers do not match for part " + a[parts_index]);
       }
-      if (n_dk > 1) {
-        for (int i = 0; i < n_dk; i ++) {
-          dk_pn = StrReplace(dk_pns[i], " ", "");;
-          mf_pn = StrReplace(mf_pns[i], " ", "");;
-          List += "\"" + dk_pn + "\", \"" + mf_pn + "\", \"" + parts + "\", \"" + quantity + "\"\n";
+      for (int i = 0; i < n_dk; i++) {
+        dk_pn = StrReplace(dk_pns[i], " ", "");;
+        mf_pn = StrReplace(mf_pns[i], " ", "");;
+        if (dk_pn != "N/A" && mf_pn != "N/A") {
+          comps_dk_pn[num_comps] = dk_pn;
+          comps_mf_pn[num_comps] = mf_pn;
+          comps_refdes[num_comps] = parts;
+          comps_qty[num_comps] = quantity;
+          num_comps++;
         }
-      } else {
-        List += "\"" + dk_pn + "\", \"" + mf_pn + "\", \"" + parts + "\", \"" + quantity + "\"\n";
       }
     }
   }
@@ -837,7 +836,40 @@ string MakeListDigikey (void)
     dlgMessageBox (tr ("The following parts have no Digikey part number:\n\n") + strsub(bad_parts, 2));
   }
 
-  return List;
+  // Combine the parts that have the same part number
+  for (int c1 = 0; c1 < num_comps; c1++) {
+    if (comps_qty[c1] == 0) {
+      continue;
+    }
+    for (int c2 = c1 + 1; c2 < num_comps; c2++) {
+      if (comps_qty[c2] == 0) {
+        continue;
+      }
+      if (comps_dk_pn[c1] == comps_dk_pn[c2] &&
+          comps_mf_pn[c1] == comps_mf_pn[c2]) {
+        comps_refdes[c1] += ", " + comps_refdes[c2];
+        comps_qty[c1] += comps_qty[c2];
+        comps_qty[c2] = 0;
+      }
+    }
+  }
+
+  // Create the list string.
+  list += "\"Digi-Key Part Number\", ";
+  list += "\"Manufacturer Part Number\", ";
+  list += "\"Reference Designator\", ";
+  list += "\"Quantity1\", ";
+  list += "\n";
+  for (int m = 0; m < num_comps; m++) {
+    if (comps_qty[m] == 0) {
+      continue;
+    }
+    string line = "";
+    sprintf(line, "\"%s\", \"%s\", \"%s\", \"%d\"", comps_dk_pn[m], comps_mf_pn[m], comps_refdes[m], comps_qty[m]);
+    list += line + "\n";
+  }
+
+  return list;
 }
 
 
